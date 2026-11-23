@@ -9,9 +9,13 @@
  *   task-inbox pull T-12|next [--ready] [--out DIR]   → job folder with task.md + files/ (next --ready: most urgent task Claude may take now; exit 2 when none)
  *   task-inbox hold T-12                          → {active,by,at,note} — did the team press "หยุดก่อน"?
  *   task-inbox create --title "…" (--body-file brief.md | --body "…") [--systems web,backend] [--priority urgent|high|normal|low] [--files a.png b.zip]
- *   task-inbox comment T-12 (--text "…" | --file note.md) [--status new|…]
- *   task-inbox report T-12 (--text "…" | --file summary.md) [--status review|needs_info|done] [--link "ชื่อ=https://…"]…
- *   task-inbox status T-12 review
+ *   task-inbox comment T-12 (--text "…" | --file note.md) [--status new|…] [--wait <name> [--wait-action ตอบ|ทดสอบ|อนุมัติ|ทำ]]
+ *   task-inbox report T-12 (--text "…" | --file summary.md) [--status review|needs_info|done] [--link "ชื่อ=https://…"]… [--wait …]
+ *   task-inbox status T-12 review [--wait <name> --wait-action ทดสอบ]
+ *   task-inbox wait T-12 <name>[,<name>…]|auto|none [--action ตอบ|ทดสอบ|อนุมัติ|ทำ]   → "ถึงตาใคร" only
+ *                      ถึงตาใคร (who acts next) follows the status by itself: needs_info → whoever filed it ตอบ,
+ *                      review → whoever filed it ทดสอบ, new/in_progress → Claude ทำ. --wait overrides it
+ *                      (team names, or claude / owner); auto = back to the rule, none = nobody.
  *   task-inbox upload T-12 file1 file2 …
  *   task-inbox rm-file T-12 <attachmentId>
  *
@@ -23,13 +27,36 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { fileURLToPath } from "node:url";
 
 const CONFIG = join(homedir(), ".task-inbox.json");
 const STATUSES = ["new", "in_progress", "needs_info", "review", "done", "cancelled"];
 const STATUS_TH = { new: "งานใหม่", in_progress: "กำลังทำ", needs_info: "รอข้อมูลเพิ่ม", review: "รอทดสอบ", done: "เสร็จแล้ว", cancelled: "ยกเลิก" };
 const PRIORITY_TH = { urgent: "ด่วนมาก", high: "ด่วน", normal: "ปกติ", low: "ไม่รีบ" };
+const WAIT_ACTIONS = { answer: "ตอบ", test: "ทดสอบ", approve: "อนุมัติ", do: "ทำ" };
 
-function parseArgs(argv) {
+/** `--wait-action` in Thai or English → answer | test | approve | do; null when not one of them. */
+export function waitAction(raw) {
+  const s = String(raw ?? "").trim().toLowerCase();
+  if (!s) return null;
+  if (s in WAIT_ACTIONS) return s;
+  const hit = Object.entries(WAIT_ACTIONS).find(([, th]) => th === s);
+  return hit ? hit[0] : null;
+}
+
+/** `{wait: {who, action}}` for the request body from --wait / --wait-action (or `wait` + --action); {} when neither is given. */
+export function waitBody(opt, who = opt.wait, actionRaw = opt["wait-action"]) {
+  const hasWho = who !== undefined && who !== true && String(who).trim() !== "";
+  const hasAction = actionRaw !== undefined && actionRaw !== true && String(actionRaw).trim() !== "";
+  if (who === true) throw new Error("--wait ต้องตามด้วยชื่อ เช่น --wait Alice (หรือ auto / none)");
+  if (actionRaw === true) throw new Error("--wait-action ต้องตามด้วย ตอบ / ทดสอบ / อนุมัติ / ทำ");
+  if (!hasWho && !hasAction) return {};
+  const action = hasAction ? waitAction(actionRaw) : undefined;
+  if (hasAction && !action) throw new Error(`--wait-action ไม่ถูกต้อง: ${actionRaw} (ใช้ ตอบ / ทดสอบ / อนุมัติ / ทำ หรือ answer / test / approve / do)`);
+  return { wait: { ...(hasWho ? { who: String(who).trim() } : {}), ...(action ? { action } : {}) } };
+}
+
+export function parseArgs(argv) {
   const pos = [];
   const opt = {};
   for (let i = 0; i < argv.length; i++) {
@@ -77,6 +104,9 @@ async function call(cfg, path, { method = "GET", body, form, asClaude, force } =
   return data;
 }
 
+const tryWait = (opt, who, action) => { try { return who === undefined && action === undefined ? waitBody(opt) : waitBody(opt, who, action); } catch (e) { die(e.message); } };
+const turnLine = (task) => (task.waitingLabel ? ` · ${task.waitingLabel}` : "");
+
 const holdLine = (task) => (task.hold?.active ? `hold: ${JSON.stringify(task.hold)}` : "hold: none");
 
 const readText = (file) => readFileSync(resolve(file), "utf8");
@@ -111,8 +141,9 @@ function printTasks(tasks) {
     const sys = t.systems.length ? ` [${t.systems.join(",")}]` : "";
     const pri = t.priority === "normal" ? "" : ` (${PRIORITY_TH[t.priority]})`;
     const held = t.hold?.active ? " · หยุดก่อน!" : "";
+    const turn = t.waitingLabel ? ` · ${t.waitingLabel}` : "";
     const ready = t.status === "new" && t.readyAt ? (Date.parse(t.readyAt) <= Date.now() ? " · พร้อมให้ Claude" : ` · พร้อมให้ Claude ${fmt(t.readyAt)}`) : "";
-    console.log(`${t.id.padEnd(6)} ${STATUS_TH[t.status].padEnd(12)} ${t.title}${sys}${pri} · ${t.createdBy.name} · ${fmt(t.updatedAt)} · ${t.attachments.length} ไฟล์${ready}${held}`);
+    console.log(`${t.id.padEnd(6)} ${STATUS_TH[t.status].padEnd(12)} ${t.title}${sys}${pri} · ${t.createdBy.name} · ${fmt(t.updatedAt)} · ${t.attachments.length} ไฟล์${turn}${ready}${held}`);
   }
 }
 
@@ -234,8 +265,9 @@ const commands = {
     const text = opt.file ? readText(String(opt.file)) : String(opt.text ?? "");
     if (!text.trim()) die("ต้องมี --text หรือ --file");
     if (opt.status && !STATUSES.includes(opt.status)) die(`สถานะไม่ถูกต้อง: ${opt.status}`);
-    const { task } = await call(cfg, `/api/tasks/${id}/comments`, { method: "POST", body: { text, status: opt.status }, asClaude: isClaude(opt), force: Boolean(opt.force) });
-    console.log(`ส่งความเห็นใน ${task.id} แล้ว · สถานะ ${STATUS_TH[task.status]}`);
+    const wait = tryWait(opt);
+    const { task } = await call(cfg, `/api/tasks/${id}/comments`, { method: "POST", body: { text, status: opt.status, ...wait }, asClaude: isClaude(opt), force: Boolean(opt.force) });
+    console.log(`ส่งความเห็นใน ${task.id} แล้ว · สถานะ ${STATUS_TH[task.status]}${turnLine(task)}`);
   },
 
   async report({ pos, opt }) {
@@ -245,8 +277,9 @@ const commands = {
     if (!text.trim()) die("ต้องมี --text หรือ --file (สรุปงานเป็น markdown)");
     const status = opt.status || "review";
     if (!STATUSES.includes(status)) die(`สถานะไม่ถูกต้อง: ${status}`);
-    const { task } = await call(cfg, `/api/tasks/${id}/report`, { method: "POST", body: { text, status, links: parseLinks(opt.link) }, asClaude: isClaude(opt), force: Boolean(opt.force) });
-    console.log(`ส่งสรุปงาน ${task.id} แล้ว · สถานะ ${STATUS_TH[task.status]}`);
+    const wait = tryWait(opt);
+    const { task } = await call(cfg, `/api/tasks/${id}/report`, { method: "POST", body: { text, status, links: parseLinks(opt.link), ...wait }, asClaude: isClaude(opt), force: Boolean(opt.force) });
+    console.log(`ส่งสรุปงาน ${task.id} แล้ว · สถานะ ${STATUS_TH[task.status]}${turnLine(task)}`);
     console.log(`${cfg.url}/t/${task.id}`);
   },
 
@@ -254,8 +287,19 @@ const commands = {
     const [id, status] = pos;
     if (!id || !STATUSES.includes(status)) die(`ใช้: task-inbox status T-12 <${STATUSES.join("|")}>`);
     const cfg = need(loadConfig());
-    const { task } = await call(cfg, `/api/tasks/${id}`, { method: "PATCH", body: { status }, asClaude: isClaude(opt), force: Boolean(opt.force) });
-    console.log(`${task.id} → ${STATUS_TH[task.status]}`);
+    const wait = tryWait(opt);
+    const { task } = await call(cfg, `/api/tasks/${id}`, { method: "PATCH", body: { status, ...wait }, asClaude: isClaude(opt), force: Boolean(opt.force) });
+    console.log(`${task.id} → ${STATUS_TH[task.status]}${turnLine(task)}`);
+  },
+
+  /** `wait T-12 Alice --action อนุมัติ` / `wait T-12 auto`: change only "ถึงตาใคร". */
+  async wait({ pos, opt }) {
+    const [id, who] = pos;
+    if (!id || (!who && !opt.action)) die("ใช้: task-inbox wait T-12 <ชื่อ>[,<ชื่อ>…]|auto|none [--action ตอบ|ทดสอบ|อนุมัติ|ทำ]");
+    const cfg = need(loadConfig());
+    const wait = tryWait(opt, who, opt.action);
+    const { task } = await call(cfg, `/api/tasks/${id}`, { method: "PATCH", body: wait, asClaude: isClaude(opt) });
+    console.log(`${task.id} · ${task.waitingLabel || "ไม่มีใครต้องทำอะไรต่อ"}`);
   },
 
   async upload({ pos }) {
@@ -286,7 +330,11 @@ const commands = {
   },
 };
 
-const { pos, opt } = parseArgs(process.argv.slice(2));
-const cmd = pos.shift() || "help";
-if (!commands[cmd]) die(`ไม่รู้จักคำสั่ง ${cmd}\n` + Object.keys(commands).join(", "));
-Promise.resolve(commands[cmd]({ pos, opt })).catch((e) => die(e?.message || String(e)));
+// Run only as a program (tests import the helpers above).
+const isMain = (() => { try { const a = resolve(process.argv[1] || ""); const b = fileURLToPath(import.meta.url); return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b; } catch { return false; } })();
+if (isMain) {
+  const { pos, opt } = parseArgs(process.argv.slice(2));
+  const cmd = pos.shift() || "help";
+  if (!commands[cmd]) die(`ไม่รู้จักคำสั่ง ${cmd}\n` + Object.keys(commands).join(", "));
+  Promise.resolve(commands[cmd]({ pos, opt })).catch((e) => die(e?.message || String(e)));
+}

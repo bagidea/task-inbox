@@ -2,7 +2,8 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { FileDrop } from "./FileDrop";
-import { Avatar, CopyButton, Md, Notice, PriorityPicker, ReadinessChip, Spinner, StatusPill, SystemChips, SystemPicker, useNow } from "./bits";
+import { Avatar, CopyButton, Md, Notice, PriorityPicker, ReadinessChip, Spinner, StatusPill, SystemChips, SystemPicker, WaitingChip, useNow } from "./bits";
+import { WAIT_ACTIONS, WAIT_ACTION_LABEL, isWaitingOn, type WaitAction } from "@/lib/waiting";
 import { describeEvent, fmtSize } from "@/lib/export";
 import { PRIORITY_LABEL, STATUS_LABEL, type Priority, type PublicUser, type Status, type System, type Task, type TaskEvent } from "@/lib/types";
 import { STATUS_STYLE, api, fmtDateTime, timeAgo } from "@/lib/ui";
@@ -65,6 +66,7 @@ export function TaskView({ initialTask, initialEvents, user }: Props) {
               <h1 className="display min-w-0 flex-1 text-2xl sm:text-3xl">{task.title}</h1>
               <button type="button" className="btn btn-ghost btn-sm" onClick={() => setEditing(true)}>แก้ไข</button>
             </div>
+            <WaitBar task={task} meId={user.id} busy={busy} onSave={(wait) => patch({ wait })} />
             <div className="flex flex-wrap items-center gap-2 text-sm text-mist">
               <StatusPill status={task.status} />
               <span className="pill bg-ink-3 text-fog">{PRIORITY_LABEL[task.priority]}</span>
@@ -99,10 +101,10 @@ export function TaskView({ initialTask, initialEvents, user }: Props) {
         )}
       </header>
 
-      <div className="grid gap-5 lg:grid-cols-[1fr_20rem]">
-        <section className="space-y-5">
-          <div className="card p-5">
-            <div className="mb-3 flex items-center justify-between">
+      <div className="grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]">
+        <section className="min-w-0 space-y-5">
+          <div className="card min-w-0 p-5">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-xs font-semibold uppercase tracking-wider text-mist">รายละเอียดงาน</h2>
               <div className="flex gap-1">
                 <CopyButton text={task.body} label="คัดลอก md" />
@@ -113,7 +115,7 @@ export function TaskView({ initialTask, initialEvents, user }: Props) {
           </div>
           <Timeline task={task} events={events} onChange={reload} />
         </section>
-        <aside className="space-y-5">
+        <aside className="min-w-0 space-y-5">
           <Files task={task} onChange={reload} />
           <div className="card p-4 text-xs text-mist">
             <div className="font-semibold text-fog">รับงานนี้ด้วย Claude</div>
@@ -234,8 +236,8 @@ function Timeline({ task, events, onChange }: { task: Task; events: TaskEvent[];
   }
   const latestReport = [...events].reverse().find((e) => e.type === "report");
   return (
-    <div className="card p-5">
-      <div className="mb-4 flex items-center justify-between">
+    <div className="card min-w-0 p-5">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-xs font-semibold uppercase tracking-wider text-mist">ไทม์ไลน์</h2>
         {latestReport && <CopyButton text={reportForLine(task, latestReport)} label="คัดลอกสรุปล่าสุดไปวาง LINE" className="btn btn-ghost btn-sm" />}
       </div>
@@ -245,6 +247,7 @@ function Timeline({ task, events, onChange }: { task: Task; events: TaskEvent[];
       <div className="mt-5 space-y-2 border-t border-line pt-4">
         {error && <Notice>{error}</Notice>}
         <textarea className="field min-h-[5rem]" placeholder="เขียนความเห็น ตอบคำถาม หรือเพิ่มรายละเอียด (markdown ได้)" value={text} onChange={(e) => setText(e.target.value)} />
+        {task.waiting && task.waiting.who.some((t) => t.kind === "user") && task.waiting.action !== "do" && <p className="text-xs text-mist">{task.waitingLabel} อยู่ — พอคนนั้นส่งความเห็น ระบบจะส่งตากลับไปให้ Claude ทำต่อเอง</p>}
         <div className="flex flex-wrap gap-2">
           <button type="button" className="btn btn-lime btn-sm" disabled={busy || !text.trim()} onClick={() => send()}>{busy ? <Spinner /> : "ส่งความเห็น"}</button>
           {task.status === "needs_info" && <button type="button" className="btn btn-ghost btn-sm" disabled={busy || !text.trim()} onClick={() => send("new")}>ตอบแล้ว → กลับเป็นงานใหม่</button>}
@@ -264,7 +267,7 @@ function EventRow({ e, task }: { e: TaskEvent; task: Task }) {
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline gap-x-2 text-sm">
           <span className="font-semibold">{e.actor.name}</span>
-          {!rich && <span className={e.type === "hold" ? "text-coral" : e.type === "resume" || e.type === "ready_now" ? "text-violet" : "text-mist"}>{describeEvent(e)}</span>}
+          {!rich && <span className={e.type === "hold" ? "text-coral" : e.type === "resume" || e.type === "ready_now" ? "text-violet" : e.type === "waiting" ? "text-sky" : "text-mist"}>{describeEvent(e)}</span>}
           {e.type === "report" && <span className="pill bg-violet/15 text-violet">สรุปงาน</span>}
           <span className="text-xs text-mist">{fmtDateTime(e.at)}</span>
         </div>
@@ -287,4 +290,60 @@ export function reportForLine(task: Task, e: TaskEvent): string {
   const lines = [`[${task.id}] ${task.title}`, "", (e.text ?? "").trim()];
   if (e.links?.length) lines.push("", ...e.links.map((l) => `${l.label}: ${l.url}`));
   return lines.join("\n");
+}
+
+/**
+ * "ถึงตาใคร" on the task page: the big chip, and a small form to change it
+ * (anyone signed in): a person + what they must do, back to automatic, or nobody.
+ */
+function WaitBar({ task, meId, busy, onSave }: { task: Task; meId: string; busy: boolean; onSave: (wait: { who: string; action?: WaitAction }) => Promise<void> }) {
+  const [people, setPeople] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => { api<{ users: { id: string; name: string }[] }>("/api/team").then((r) => setPeople(r.users)).catch(() => {}); }, []);
+  const [open, setOpen] = useState(false);
+  const [who, setWho] = useState("auto");
+  const [action, setAction] = useState<WaitAction>("answer");
+  const w = task.waiting;
+  const mine = isWaitingOn(w, meId);
+  function start() {
+    const first = w?.who[0];
+    setWho(task.waitingOn && task.waitingOn.status === task.status ? (!w ? "none" : first?.kind === "claude" ? "claude" : first?.id ?? "auto") : "auto");
+    setAction(w?.action ?? "answer");
+    setOpen(true);
+  }
+  return (
+    <div className={`rounded-2xl border px-3 py-2.5 ${mine ? "border-lime/60 bg-lime/10" : "border-line bg-ink-3/60"}`}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wider text-mist">ถึงตาใคร</span>
+        {w ? <WaitingChip task={task} meId={meId} /> : <span className="text-sm text-mist">ไม่มีใครต้องทำอะไรต่อ</span>}
+        {task.waitingOn?.manual && task.waitingOn.status === task.status && <span className="text-[11px] text-mist">(ตั้งเอง)</span>}
+        {!open && <button type="button" className="ml-auto text-xs text-mist underline underline-offset-4 hover:text-paper" onClick={start}>เปลี่ยน</button>}
+      </div>
+      {mine && !open && <p className="mt-1.5 text-xs text-fog">{w?.action === "answer" ? "ตอบคำถามในช่องความเห็นด้านล่าง" : w?.action === "test" ? "ลองตามลิงก์ทดสอบ แล้วกด ทดสอบผ่าน หรือ ยังไม่ผ่าน ใต้ช่องความเห็น" : w?.action === "approve" ? "อ่านแล้วตอบว่าอนุมัติหรือไม่ในช่องความเห็น" : "งานนี้รอคุณทำ เขียนผลในช่องความเห็นเมื่อเสร็จ"}</p>}
+      {open && (
+        <div className="mt-2 flex flex-wrap items-end gap-2">
+          <label className="min-w-0 flex-1 basis-40">
+            <span className="label">รอใคร</span>
+            <select className="field" value={who} onChange={(e) => setWho(e.target.value)}>
+              <option value="auto">อัตโนมัติ (ตามสถานะ)</option>
+              <option value="claude">Claude</option>
+              {people.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+              <option value="none">ไม่มีใคร</option>
+            </select>
+          </label>
+          {who !== "auto" && who !== "none" && (
+            <label className="min-w-0 basis-28">
+              <span className="label">ให้ทำอะไร</span>
+              <select className="field" value={action} onChange={(e) => setAction(e.target.value as WaitAction)}>
+                {WAIT_ACTIONS.map((a) => <option key={a} value={a}>{WAIT_ACTION_LABEL[a]}</option>)}
+              </select>
+            </label>
+          )}
+          <div className="flex gap-2">
+            <button type="button" className="btn btn-lime btn-sm" disabled={busy} onClick={async () => { await onSave(who === "auto" || who === "none" ? { who } : { who, action }); setOpen(false); }}>{busy ? <Spinner /> : "บันทึก"}</button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setOpen(false)}>ยกเลิก</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }

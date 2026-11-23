@@ -1,9 +1,10 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { PriorityPill, ReadinessChip, StatusPill, SystemChips } from "./bits";
+import { PriorityPill, ReadinessChip, StatusPill, SystemChips, WaitingChip } from "./bits";
 import { useInboxConfig } from "./config";
-import { STATUS_LABEL, type Status, type System, type Task } from "@/lib/types";
+import { STATUS_LABEL, type PublicUser, type Status, type System, type Task } from "@/lib/types";
+import { isWaitingOn } from "@/lib/waiting";
 import { api, timeAgo } from "@/lib/ui";
 
 const TABS: { key: string; label: string; statuses: Status[] }[] = [
@@ -15,12 +16,23 @@ const TABS: { key: string; label: string; statuses: Status[] }[] = [
   { key: "all", label: "ทั้งหมด", statuses: [] },
 ];
 
-export function Board({ initialTasks }: { initialTasks: Task[] }) {
+const MINE_KEY = "inbox-wait-me";
+
+export function Board({ initialTasks, user }: { initialTasks: Task[]; user: PublicUser }) {
   const { systems: systemDefs } = useInboxConfig();
   const [tasks, setTasks] = useState(initialTasks);
   const [tab, setTab] = useState("open");
   const [system, setSystem] = useState<System | "">("");
   const [q, setQ] = useState("");
+  const [waitMe, setWaitMe] = useState(false);
+
+  useEffect(() => {
+    // The saved choice is applied after hydration on purpose (the server renders "all").
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    try { setWaitMe(window.localStorage.getItem(MINE_KEY) === "1"); } catch { /* private mode */ }
+  }, []);
+  const pickWaitMe = (on: boolean) => { setWaitMe(on); try { window.localStorage.setItem(MINE_KEY, on ? "1" : "0"); } catch { /* ignore */ } };
+  const myTurn = useMemo(() => tasks.filter((t) => isWaitingOn(t.waiting, user.id)).length, [tasks, user.id]);
 
   useEffect(() => {
     const t = setInterval(() => { api<{ tasks: Task[] }>("/api/tasks?limit=500").then((r) => setTasks(r.tasks)).catch(() => {}); }, 30_000);
@@ -29,17 +41,18 @@ export function Board({ initialTasks }: { initialTasks: Task[] }) {
 
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
-    for (const t of TABS) c[t.key] = t.statuses.length ? tasks.filter((x) => t.statuses.includes(x.status)).length : tasks.length;
+    const pool = waitMe ? tasks.filter((x) => isWaitingOn(x.waiting, user.id)) : tasks;
+    for (const t of TABS) c[t.key] = t.statuses.length ? pool.filter((x) => t.statuses.includes(x.status)).length : pool.length;
     return c;
-  }, [tasks]);
+  }, [tasks, waitMe, user.id]);
 
   const shown = useMemo(() => {
     const statuses = TABS.find((t) => t.key === tab)?.statuses ?? [];
     const needle = q.trim().toLowerCase();
     return tasks
-      .filter((t) => (!statuses.length || statuses.includes(t.status)) && (!system || t.systems.includes(system)) && (!needle || t.id.toLowerCase().includes(needle) || t.title.toLowerCase().includes(needle) || t.createdBy.name.toLowerCase().includes(needle)))
-      .sort((a, b) => rank(a) - rank(b) || b.updatedAt.localeCompare(a.updatedAt));
-  }, [tasks, tab, system, q]);
+      .filter((t) => (!statuses.length || statuses.includes(t.status)) && (!waitMe || isWaitingOn(t.waiting, user.id)) && (!system || t.systems.includes(system)) && (!needle || t.id.toLowerCase().includes(needle) || t.title.toLowerCase().includes(needle) || t.createdBy.name.toLowerCase().includes(needle)))
+      .sort((a, b) => Number(isWaitingOn(b.waiting, user.id)) - Number(isWaitingOn(a.waiting, user.id)) || rank(a) - rank(b) || b.updatedAt.localeCompare(a.updatedAt));
+  }, [tasks, tab, system, q, waitMe, user.id]);
 
   return (
     <div className="space-y-5">
@@ -47,11 +60,12 @@ export function Board({ initialTasks }: { initialTasks: Task[] }) {
         <div>
           <h1 className="display text-3xl">งาน</h1>
           <p className="mt-1 text-sm text-mist">{counts.open} งานค้างอยู่ · {counts.new} งานใหม่ · {counts.needs_info} รอข้อมูล</p>
+          {myTurn > 0 && !waitMe && <button type="button" onClick={() => pickWaitMe(true)} className="wait-me pill mt-2">ถึงตาคุณ {myTurn} งาน → ดู</button>}
         </div>
-        <Link href="/new" className="btn btn-lime hidden sm:inline-flex">+ สร้างงาน</Link>
+        <div className="hidden sm:block"><Link href="/new" className="btn btn-lime">+ สร้างงาน</Link></div>
       </div>
 
-      <div className="scroll-x -mx-4 flex gap-1 px-4">
+      <div className="scroll-x flex gap-1">
         {TABS.map((t) => (
           <button key={t.key} type="button" onClick={() => setTab(t.key)} className={`tab ${tab === t.key ? "tab-on" : ""}`}>
             {t.label} <span className="ml-1 opacity-60">{counts[t.key]}</span>
@@ -59,9 +73,15 @@ export function Board({ initialTasks }: { initialTasks: Task[] }) {
         ))}
       </div>
 
-      <div className="flex flex-col gap-2 sm:flex-row">
-        <input className="field sm:max-w-xs" placeholder="ค้นหา: ชื่องาน, T-12, ผู้สั่ง" value={q} onChange={(e) => setQ(e.target.value)} />
-        <div className="scroll-x flex gap-1.5">
+      <div className="scroll-x flex items-center gap-1.5">
+        <span className="shrink-0 text-xs text-mist">ใคร:</span>
+        <button type="button" onClick={() => pickWaitMe(false)} className={`chip ${!waitMe ? "chip-on" : ""}`}>ทุกคน</button>
+        <button type="button" onClick={() => pickWaitMe(true)} className={`chip ${waitMe ? "chip-on" : ""}`}>รอฉัน{myTurn ? ` ${myTurn}` : ""}</button>
+      </div>
+
+      <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
+        <input className="field min-w-0 sm:max-w-xs" placeholder="ค้นหา: ชื่องาน, T-12, ผู้สั่ง" value={q} onChange={(e) => setQ(e.target.value)} />
+        <div className="scroll-x flex min-w-0 gap-1.5">
           <button type="button" onClick={() => setSystem("")} className={`chip ${system === "" ? "chip-on" : ""}`}>ทุกระบบ</button>
           {systemDefs.map((s) => (
             <button key={s.key} type="button" onClick={() => setSystem(system === s.key ? "" : s.key)} className={`chip ${system === s.key ? "chip-on" : ""}`}>{s.label}</button>
@@ -71,7 +91,7 @@ export function Board({ initialTasks }: { initialTasks: Task[] }) {
 
       {shown.length === 0 ? (
         <div className="card p-10 text-center text-mist">
-          ไม่มีงานในมุมมองนี้
+          {waitMe ? "ไม่มีงานที่รอคุณอยู่ 🎉" : "ไม่มีงานในมุมมองนี้"}
           <div className="mt-3"><Link href="/new" className="btn btn-ghost btn-sm">สร้างงานแรก</Link></div>
         </div>
       ) : (
@@ -82,17 +102,18 @@ export function Board({ initialTasks }: { initialTasks: Task[] }) {
                 <div className="flex items-start gap-3">
                   <span className="mt-0.5 shrink-0 font-mono text-xs text-mist">{t.id}</span>
                   <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h2 className="truncate font-semibold">{t.title}</h2>
+                    <div className="flex min-w-0 items-start gap-2">
+                      <h2 className="line-clamp-2 min-w-0 flex-1 break-words font-semibold">{t.title}</h2>
                       <PriorityPill priority={t.priority} />
                     </div>
+                    {t.waitingLabel && <div className="mt-2"><WaitingChip task={t} meId={user.id} /></div>}
                     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-mist">
                       <StatusPill status={t.status} />
                       <ReadinessChip task={t} compact />
                       <SystemChips systems={t.systems} />
                       <span>· {t.createdBy.name}</span>
                       {t.attachments.length > 0 && <span>· {t.attachments.length} ไฟล์</span>}
-                      <span className="ml-auto">{timeAgo(t.updatedAt)}</span>
+                      <span className="ml-auto whitespace-nowrap">{timeAgo(t.updatedAt)}</span>
                     </div>
                   </div>
                 </div>

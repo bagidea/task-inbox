@@ -5,12 +5,29 @@ import remarkGfm from "remark-gfm";
 import { useInboxConfig, useSystemLabel } from "./config";
 import { PRIORITY_LABEL, STATUS_LABEL, type Priority, type Status, type System, type Task } from "@/lib/types";
 import { PRIORITY_STYLE, STATUS_STYLE, fmtDateTime } from "@/lib/ui";
+import { WAIT_ACTION_LABEL, isWaitingOn } from "@/lib/waiting";
 
 export const StatusPill = ({ status }: { status: Status }) => <span className={`pill pill-dot ${STATUS_STYLE[status]}`}>{STATUS_LABEL[status]}</span>;
 export const PriorityPill = ({ priority }: { priority: Priority }) => priority === "normal" ? null : <span className={`pill ${PRIORITY_STYLE[priority]}`}>{PRIORITY_LABEL[priority]}</span>;
 export function SystemChips({ systems }: { systems: System[] }) {
   const label = useSystemLabel();
   return <span className="flex flex-wrap gap-1">{systems.map((s) => <span key={s} className="chip">{label(s)}</span>)}</span>;
+}
+
+/**
+ * "ถึงตาใคร": who has to act next ("รอ Alice ตอบ"). Lime and "ถึงตาคุณ" when it
+ * is the signed-in person (the owner counts for Claude's turns).
+ */
+export function WaitingChip({ task, meId, compact = false }: { task: Pick<Task, "waiting" | "waitingLabel">; meId: string; compact?: boolean }) {
+  const w = task.waiting;
+  if (!w || !task.waitingLabel) return null;
+  const me = isWaitingOn(w, meId);
+  const label = me ? `ถึงตาคุณ: ${WAIT_ACTION_LABEL[w.action]}` : task.waitingLabel;
+  return (
+    <span className={`pill wait-pill ${me ? "wait-me" : w.who.some((t) => t.kind === "claude") ? "bg-violet/15 text-violet" : "bg-sky/15 text-sky"} ${compact ? "" : "text-sm"}`} title={task.waitingLabel}>
+      <span aria-hidden className="wait-dot" />{label}
+    </span>
+  );
 }
 
 /**

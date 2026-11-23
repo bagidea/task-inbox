@@ -27,11 +27,22 @@ node "~/.claude/skills/task-inbox/task-inbox.mjs" <command> …
 | `pull T-12 \| next [--out DIR] --as-claude` | ดึงงานลงโฟลเดอร์ `NewJob/<วันที่>_T-12/` (task.md, task.json, files/) และเปลี่ยนสถานะเป็น กำลังทำ `next` = งานใหม่/รอข้อมูล ที่ด่วนที่สุด · เมื่อใส่ `--as-claude` จะคอมเมนต์ "Claude รับงานแล้ว…" ให้ทีมเอง และพิมพ์บรรทัด `hold:` ท้ายสุด |
 | `pull next --ready --as-claude` | ดึงงานที่พร้อมให้ Claude ที่ด่วนที่สุด (ใช้ในลูปรับงานอัตโนมัติ) ถ้าไม่มีพิมพ์ "ไม่มีงานพร้อมทำ" และออกด้วยรหัส 2 |
 | `hold T-12` | พิมพ์ JSON `{"active":true,"by":…,"at":…,"note":…}` หรือ `{"active":false}` — ทีมกด "หยุดก่อน" ไว้ไหม |
-| `report T-12 --file summary.md [--status review\|needs_info\|done] [--link "ชื่อ=URL"]… --as-claude` | ส่งสรุปงานขึ้นเว็บ (ค่าเริ่มต้น → รอทดสอบ) |
-| `comment T-12 --text "…" \| --file note.md [--status …] --as-claude` | ความเห็น/คำถาม ไม่เปลี่ยนสถานะเว้นแต่ระบุ |
+| `report T-12 --file summary.md [--status review\|needs_info\|done] [--link "ชื่อ=URL"]… [--wait <ชื่อ> --wait-action <การกระทำ>] --as-claude` | ส่งสรุปงานขึ้นเว็บ (ค่าเริ่มต้น → รอทดสอบ = "รอ <ผู้สั่ง> ทดสอบ") |
+| `comment T-12 --text "…" \| --file note.md [--status …] [--wait <ชื่อ> --wait-action <การกระทำ>] --as-claude` | ความเห็น/คำถาม ไม่เปลี่ยนสถานะเว้นแต่ระบุ |
 | `create --title "…" --body-file brief.md [--systems web,backend] [--priority urgent\|high\|normal\|low] [--files a.png b.zip]` | สร้างงานใหม่ |
-| `status T-12 <new\|in_progress\|needs_info\|review\|done\|cancelled>` | เปลี่ยนสถานะอย่างเดียว |
+| `status T-12 <new\|in_progress\|needs_info\|review\|done\|cancelled> [--wait <ชื่อ> --wait-action <การกระทำ>]` | เปลี่ยนสถานะ (และถึงตาใคร ถ้าใส่) |
+| `wait T-12 <ชื่อ>[,<ชื่อ>…]\|auto\|none [--action ตอบ\|ทดสอบ\|อนุมัติ\|ทำ]` | เปลี่ยนเฉพาะ "ถึงตาใคร" — `auto` = กลับไปตามสถานะ, `none` = ไม่มีใครต้องทำ |
 | `upload T-12 files…` / `rm-file T-12 <id>` | แนบ/ลบไฟล์ |
+
+**ถึงตาใคร (`--wait`)** — ทุกงานบอกว่าใครต้องทำอะไรต่อ เช่น "รอ Alice ตอบ", "รอ Bob ทดสอบ", "รอ Claude ทำ" ตามสถานะโดยอัตโนมัติ: รอข้อมูลเพิ่ม → ผู้สั่งงาน **ตอบ**, รอทดสอบ → ผู้สั่งงาน **ทดสอบ**, งานใหม่/กำลังทำ → Claude **ทำ**, เสร็จ/ยกเลิก → ไม่มีใคร เมื่อคนที่ถูกรอเขียนความเห็น ระบบส่งตากลับให้ Claude เอง ถ้าคนที่ต้องตอบ/ทดสอบ/อนุมัติ **ไม่ใช่ผู้สั่งงาน** ให้ระบุเอง:
+
+| ตัวเลือก | ความหมาย |
+| --- | --- |
+| `--wait Alice` | รอ Alice (ชื่อ, อีเมล, ส่วนหน้าอีเมล, `claude`, `owner`; หลายคนคั่นด้วย `,`) |
+| `--wait-action ตอบ\|ทดสอบ\|อนุมัติ\|ทำ` | ให้ทำอะไร (หรือ `answer` / `test` / `approve` / `do`) — ไม่ใส่ = ตอบ |
+| `--wait auto` / `--wait none` | กลับไปตามสถานะ / ไม่มีใครต้องทำ |
+
+ตัวอย่าง: `report T-12 --file summary.md --wait Bob --wait-action ทดสอบ --as-claude` · `comment T-12 --text "ขออนุมัติราคา" --status needs_info --wait owner --wait-action อนุมัติ --as-claude` ค่าที่ตั้งเองใช้ได้จนกว่าสถานะจะเปลี่ยน `list` แสดงถึงตาใครท้ายแต่ละบรรทัด
 
 **กติกา "หยุดก่อน"**: ทีมกดปุ่มนี้ที่หน้างานเมื่ออยากแก้โจทย์ระหว่างที่ Claude ทำอยู่ ระหว่างนั้น `report` / `comment` / `status` ที่ทำในนาม Claude จะถูกปฏิเสธ (CLI ออกด้วยรหัส 3 พร้อมข้อความไทย) → **หยุด deploy/ส่งสรุป** ไปอ่านความเห็นใหม่ด้วย `show T-12` แล้วทำตาม รอจนทีมกด "ให้ทำต่อ" (เช็กด้วย `hold T-12`) `--force` ใช้ได้เฉพาะเมื่อผู้ใช้สั่งเอง ก่อน deploy และก่อน report ทุกครั้งให้เช็ก `hold` ก่อน
 

@@ -4,17 +4,10 @@ import { usePathname, useRouter } from "next/navigation";
 import type { ReactNode } from "react";
 import type { PublicUser } from "@/lib/types";
 import { api } from "@/lib/ui";
-import { useInboxConfig } from "./config";
+import { Logo } from "./Brand";
+import { InstallButton, PwaBoot } from "./PhoneApp";
 
-export function Logo({ className = "" }: { className?: string }) {
-  const { name } = useInboxConfig();
-  return (
-    <span className={`display inline-flex items-center gap-2 ${className}`}>
-      <span className="grid size-8 place-items-center rounded-xl bg-lime text-ink text-sm font-bold">{name.trim().charAt(0).toUpperCase() || "T"}</span>
-      <span className="text-paper">{name}</span>
-    </span>
-  );
-}
+export { Logo } from "./Brand";
 
 export function Shell({ user, children, wide = false }: { user: PublicUser; children: ReactNode; wide?: boolean }) {
   const path = usePathname();
@@ -31,13 +24,15 @@ export function Shell({ user, children, wide = false }: { user: PublicUser; chil
   }
   return (
     <div className="flex min-h-full flex-col">
+      <PwaBoot />
       <header className="sticky top-0 z-20 border-b border-line bg-ink/85 backdrop-blur">
         <div className={`mx-auto flex h-14 items-center gap-3 px-4 ${wide ? "max-w-7xl" : "max-w-5xl"}`}>
-          <Link href="/" className="shrink-0"><Logo /></Link>
+          <Link href="/" className="min-w-0 shrink"><Logo compactName /></Link>
           <nav className="ml-2 hidden items-center gap-1 sm:flex">
             {nav.map((n) => <Link key={n.href} href={n.href} className={`tab ${n.on ? "tab-on" : ""}`}>{n.label}</Link>)}
           </nav>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <InstallButton />
             <Link href="/new" className="btn btn-lime btn-sm sm:hidden">+ งาน</Link>
             <span className="hidden text-sm text-mist md:inline">{user.name}</span>
             <button type="button" onClick={logout} className="btn btn-ghost btn-sm">ออก</button>

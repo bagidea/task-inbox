@@ -1,12 +1,13 @@
 /** JSON-file store for a laptop and for tests. */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import type { Branding } from "@/lib/branding";
 import type { InboxSettings } from "@/lib/ready";
 import type { ApiToken, Task, TaskEvent, TaskFilter, User } from "@/lib/types";
 import { applyFilter } from "./filter";
 import type { Store } from "./types";
 
-interface Data { users: User[]; tokens: ApiToken[]; tasks: Task[]; events: TaskEvent[]; counter: number; settings?: InboxSettings }
+interface Data { users: User[]; tokens: ApiToken[]; tasks: Task[]; events: TaskEvent[]; counter: number; settings?: InboxSettings; branding?: Partial<Branding> }
 
 export class MemoryStore implements Store {
   private data: Data = { users: [], tokens: [], tasks: [], events: [], counter: 0 };
@@ -44,4 +45,6 @@ export class MemoryStore implements Store {
 
   async getSettings() { return this.data.settings ?? null; }
   async saveSettings(s: InboxSettings) { this.data.settings = s; this.persist(); }
+  async getBranding() { return this.data.branding ?? null; }
+  async saveBranding(b: Partial<Branding>) { this.data.branding = { ...(this.data.branding ?? {}), ...b }; this.persist(); }
 }

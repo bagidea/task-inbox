@@ -1,10 +1,11 @@
 /**
  * Firestore (Admin SDK): project `FIREBASE_PROJECT_ID`, database
- * `FIRESTORE_DATABASE_ID` (or the default one). Collections: users, tokens, tasks, tasks/{id}/events, meta (counters, settings).
+ * `FIRESTORE_DATABASE_ID` (or the default one). Collections: users, tokens, tasks, tasks/{id}/events, meta (counters, settings, branding).
  * Queries filter on one field at most, so no composite index is needed.
  */
 import { applicationDefault, getApps, initializeApp } from "firebase-admin/app";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
+import type { Branding } from "@/lib/branding";
 import type { InboxSettings } from "@/lib/ready";
 import type { ApiToken, Task, TaskEvent, TaskFilter, User } from "@/lib/types";
 import { applyFilter } from "./filter";
@@ -70,4 +71,6 @@ export class FirestoreStore implements Store {
 
   async getSettings() { const d = await this.db.collection("meta").doc("settings").get(); return d.exists ? (d.data() as Partial<InboxSettings>) : null; }
   async saveSettings(s: InboxSettings) { await this.db.collection("meta").doc("settings").set(s, { merge: true }); }
+  async getBranding() { const d = await this.db.collection("meta").doc("branding").get(); return d.exists ? (d.data() as Partial<Branding>) : null; }
+  async saveBranding(b: Partial<Branding>) { await this.db.collection("meta").doc("branding").set(b, { merge: true }); }
 }

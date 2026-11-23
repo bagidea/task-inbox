@@ -8,6 +8,7 @@ import { DEFAULT_GRACE_MINUTES, isHeld, isReady, normaliseGrace, sortReady, with
 import { getStore } from "./store";
 import type { Store } from "./store";
 import { systemKeys } from "./systems";
+import { WAIT_ACTION_LABEL, afterComment, doersOf, parseWaitAction, sameTargets, waitingLabel, waitingOf, type WaitAction, type WaitTarget, type Waiting } from "./waiting";
 import { PRIORITIES, STATUSES, type Actor, type Attachment, type Hold, type Priority, type Status, type System, type Task, type TaskEvent, type TaskFilter, type TaskLink } from "./types";
 
 export class TaskError extends Error {
@@ -44,6 +45,29 @@ export function parseLinks(v: unknown): TaskLink[] {
 
 export interface NewTask { title: string; body: string; systems: System[]; priority: Priority; status?: Status }
 
+/**
+ * "ถึงตาใคร" from a page or the CLI: `who` = "auto" (back to the rules),
+ * "none", or names ("Alice", "Alice,Bob", "claude", "owner", ids, e-mails);
+ * `action` = answer | test | approve | do (or ตอบ / ทดสอบ / อนุมัติ / ทำ).
+ */
+export interface WaitInput { who?: unknown; action?: unknown }
+const filled = (v: unknown) => v !== undefined && v !== null && String(v).trim() !== "";
+export const hasWaitInput = (w: WaitInput | undefined): w is WaitInput => Boolean(w) && (filled(w!.who) || filled(w!.action));
+
+/** What a task looks like on disk: the computed fields are left out. */
+function stored(task: Task): Task {
+  const { waiting: _w, waitingLabel: _l, ...rest } = task;
+  void _w; void _l;
+  return rest;
+}
+
+/** `wait: {who, action}` or flat `waitOn` / `waitAction` in a request body (PATCH, comment, report). */
+export function waitFromBody(b: Record<string, unknown>): WaitInput | undefined {
+  const nested = b.wait && typeof b.wait === "object" ? (b.wait as Record<string, unknown>) : null;
+  const w: WaitInput = { who: nested ? nested.who : b.waitOn, action: nested ? nested.action : b.waitAction };
+  return hasWaitInput(w) ? w : undefined;
+}
+
 export class TaskService {
   constructor(private readonly store: Store = getStore(), private readonly now: () => string = () => new Date().toISOString()) {}
 
@@ -76,7 +100,60 @@ export class TaskService {
     return next;
   }
 
-  private async decorate<T extends Task>(task: T): Promise<T> { return withReadiness(task, (await this.settings()).graceMinutes); }
+  private async decorate<T extends Task>(task: T): Promise<T> { return label(withReadiness(task, (await this.settings()).graceMinutes)); }
+
+  /** The first admin: the person whose Claude does the work ("owner" in `--wait owner`). */
+  private async ownerId(): Promise<string | null> {
+    const admins = (await this.store.listUsers()).filter((u) => u.role === "admin" && !u.disabled).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return admins[0]?.id ?? null;
+  }
+
+  /**
+   * A "ถึงตาใคร" request → what to store: a Waiting, null (back to the rules)
+   * or a Waiting with nobody ("none"). Unknown names → 400.
+   */
+  async resolveWait(task: Task, input: WaitInput): Promise<Waiting | null> {
+    const whoText = (Array.isArray(input.who) ? input.who.map(String).join(",") : filled(input.who) ? String(input.who) : "").trim();
+    const action = filled(input.action) ? parseWaitAction(input.action) : null;
+    if (filled(input.action) && !action) throw new TaskError(400, `ไม่รู้จักสิ่งที่รอ "${String(input.action)}" (ใช้ ${Object.values(WAIT_ACTION_LABEL).join(" / ")} หรือ answer / test / approve / do)`);
+    const current = waitingOf(task);
+    const at = this.now();
+    if (whoText.toLowerCase() === "auto") return null;
+    if (/^(none|nobody|-|ไม่มี)$/i.test(whoText)) return { who: [], action: action ?? current?.action ?? "do", status: task.status, manual: true, at };
+    let who: WaitTarget[];
+    if (!whoText) {
+      if (!current) throw new TaskError(400, "ต้องระบุว่ารอใคร (--wait <ชื่อ>)");
+      who = current.who;
+    } else {
+      const users = (await this.store.listUsers()).filter((u) => !u.disabled);
+      const ownerId = await this.ownerId();
+      who = [];
+      for (const part of whoText.split(",").map((k) => k.trim()).filter(Boolean)) {
+        const k = part.toLowerCase();
+        let t: WaitTarget;
+        const owner = users.find((u) => u.id === ownerId);
+        if (k === "claude") t = { kind: "claude" };
+        else if (k === "owner" && owner) t = { kind: "user", id: owner.id, name: owner.name };
+        else {
+          const hit = users.find((u) => u.id === part) ?? users.find((u) => u.name.toLowerCase() === k || u.email.toLowerCase() === k || u.email.toLowerCase().split("@")[0] === k);
+          if (!hit) throw new TaskError(400, `ไม่พบคนชื่อ "${part}" ในทีม (ใช้ claude, owner หรือชื่อ/อีเมลของสมาชิก คั่นหลายคนด้วย ,)`);
+          t = { kind: "user", id: hit.id, name: hit.name };
+        }
+        if (!who.some((x) => sameTargets([x], [t]))) who.push(t);
+      }
+    }
+    const fallback: WaitAction = sameTargets(who, doersOf(task)) ? "do" : current && current.action !== "do" ? current.action : "answer";
+    return { who, action: action ?? fallback, status: task.status, manual: true, at };
+  }
+
+  /** Puts a "ถึงตาใคร" request on the task (saved by the caller) and writes its timeline line. */
+  private async applyWait(task: Task, input: WaitInput, actor: Actor): Promise<void> {
+    const next = await this.resolveWait(task, input);
+    const before = waitingLabel(waitingOf(task));
+    if (next) task.waitingOn = next; else delete task.waitingOn;
+    const after = waitingLabel(waitingOf(task));
+    if (after !== before) await this.event({ taskId: task.id, type: "waiting", actor, ...(before ? { from: before } : {}), to: after ?? "ไม่มีใคร" });
+  }
 
   async create(input: NewTask, actor: Actor): Promise<Task> {
     const title = input.title.trim();
@@ -100,7 +177,7 @@ export class TaskService {
       ...(actor.kind === "user" ? { teamActivityAt: at } : {}),
       links: [],
     };
-    await this.store.saveTask(task);
+    await this.store.saveTask(stored(task));
     await this.event({ taskId: task.id, type: "created", actor, text: "สร้างงาน" });
     return this.decorate(task);
   }
@@ -114,20 +191,20 @@ export class TaskService {
 
   async list(filter: TaskFilter): Promise<Task[]> {
     const grace = (await this.settings()).graceMinutes;
-    return (await this.store.listTasks(filter)).map((t) => withReadiness(t, grace));
+    return (await this.store.listTasks(filter)).map((t) => label(withReadiness(t, grace)));
   }
 
   /** New tasks Claude may take right now, most urgent first (`GET /api/tasks?ready=1`, `task-inbox list --ready`). */
   async listReady(now = Date.parse(this.now())): Promise<Task[]> {
     const grace = (await this.settings()).graceMinutes;
     const fresh = await this.store.listTasks({ status: ["new"] });
-    return sortReady(fresh.filter((t) => isReady(t, grace, now)), grace).map((t) => withReadiness(t, grace));
+    return sortReady(fresh.filter((t) => isReady(t, grace, now)), grace).map((t) => label(withReadiness(t, grace)));
   }
 
   events(taskId: string) { return this.store.listEvents(taskId); }
 
   /** Title / body / systems / priority / status; each change that matters gets its own line in the timeline. */
-  async update(id: string, patch: Partial<NewTask> & { links?: TaskLink[] }, actor: Actor, opts: { force?: boolean } = {}): Promise<Task> {
+  async update(id: string, patch: Partial<NewTask> & { links?: TaskLink[]; wait?: WaitInput }, actor: Actor, opts: { force?: boolean } = {}): Promise<Task> {
     const task = await this.get(id);
     if (patch.status !== undefined && patch.status !== task.status) this.guard(task, actor, Boolean(opts.force));
     const changed: string[] = [];
@@ -148,11 +225,13 @@ export class TaskService {
     if (patch.status !== undefined && patch.status !== task.status) {
       await this.event({ taskId: task.id, type: "status", actor, from: task.status, to: patch.status });
       task.status = patch.status;
+      delete task.waitingOn;
       this.releaseHold(task, actor);
     }
+    if (hasWaitInput(patch.wait)) await this.applyWait(task, patch.wait, actor);
     if (changed.length) await this.event({ taskId: task.id, type: "edit", actor, text: `แก้ไข ${changed.join(", ")}` });
     this.touch(task, actor);
-    await this.store.saveTask(task);
+    await this.store.saveTask(stored(task));
     return this.decorate(task);
   }
 
@@ -161,7 +240,7 @@ export class TaskService {
     if (actor.kind === "user" && task.hold?.active) task.hold = { ...task.hold, active: false };
   }
 
-  async comment(id: string, text: string, actor: Actor, status?: Status, opts: { force?: boolean } = {}): Promise<TaskEvent> {
+  async comment(id: string, text: string, actor: Actor, status?: Status, opts: { force?: boolean; wait?: WaitInput } = {}): Promise<TaskEvent> {
     const task = await this.get(id);
     this.guard(task, actor, Boolean(opts.force));
     if (!text.trim()) throw new TaskError(400, "ข้อความว่าง");
@@ -170,10 +249,16 @@ export class TaskService {
     if (status && status !== task.status) {
       await this.event({ taskId: task.id, type: "status", actor, from: task.status, to: status });
       task.status = status;
+      delete task.waitingOn;
       this.releaseHold(task, actor);
+    } else if (!hasWaitInput(opts.wait)) {
+      // The awaited person answered: the turn moves on without anyone touching the status.
+      const flipped = afterComment(task, actor, await this.ownerId(), this.now());
+      if (flipped) task.waitingOn = flipped;
     }
+    if (hasWaitInput(opts.wait)) await this.applyWait(task, opts.wait, actor);
     this.touch(task, actor);
-    await this.store.saveTask(task);
+    await this.store.saveTask(stored(task));
     return ev;
   }
 
@@ -184,11 +269,12 @@ export class TaskService {
     if (task.status === "new" || task.status === "needs_info") {
       await this.event({ taskId: task.id, type: "status", actor, from: task.status, to: "in_progress" });
       task.status = "in_progress";
+      delete task.waitingOn;
     }
     task.pulledAt = this.now();
     task.pulledBy = actor.name;
     this.touch(task, actor, task.pulledAt);
-    await this.store.saveTask(task);
+    await this.store.saveTask(stored(task));
     return this.decorate(task);
   }
 
@@ -199,7 +285,7 @@ export class TaskService {
     task.readyNowAt = this.now();
     task.readyNowBy = actor.name;
     task.updatedAt = task.readyNowAt;
-    await this.store.saveTask(task);
+    await this.store.saveTask(stored(task));
     await this.event({ taskId: task.id, type: "ready_now", actor, text: "ส่งให้ Claude เลย ไม่ต้องรอช่วงพัก" });
     return this.decorate(task);
   }
@@ -218,12 +304,12 @@ export class TaskService {
       await this.event({ taskId: task.id, type: "resume", actor, text: clean || undefined });
     }
     this.touch(task, actor, at);
-    await this.store.saveTask(task);
+    await this.store.saveTask(stored(task));
     return this.decorate(task);
   }
 
   /** The summary from the work session, with its links; the status usually moves to review (or needs_info for questions). */
-  async report(id: string, text: string, actor: Actor, opts: { status?: Status; links?: TaskLink[]; force?: boolean } = {}): Promise<TaskEvent> {
+  async report(id: string, text: string, actor: Actor, opts: { status?: Status; links?: TaskLink[]; force?: boolean; wait?: WaitInput } = {}): Promise<TaskEvent> {
     const task = await this.get(id);
     this.guard(task, actor, Boolean(opts.force));
     if (!text.trim()) throw new TaskError(400, "สรุปว่าง");
@@ -238,10 +324,12 @@ export class TaskService {
     if (status !== task.status) {
       await this.event({ taskId: task.id, type: "status", actor, from: task.status, to: status });
       task.status = status;
+      delete task.waitingOn;
     }
+    if (hasWaitInput(opts.wait)) await this.applyWait(task, opts.wait, actor);
     task.reportedAt = this.now();
     this.touch(task, actor, task.reportedAt);
-    await this.store.saveTask(task);
+    await this.store.saveTask(stored(task));
     return ev;
   }
 
@@ -261,7 +349,7 @@ export class TaskService {
     await getFiles().put(att.path, file.bytes, att.type);
     task.attachments = [...task.attachments, att];
     this.touch(task, actor, att.uploadedAt);
-    await this.store.saveTask(task);
+    await this.store.saveTask(stored(task));
     await this.event({ taskId: task.id, type: "file_added", actor, files: [att.name] });
     return att;
   }
@@ -273,7 +361,7 @@ export class TaskService {
     await getFiles().remove(att.path);
     task.attachments = task.attachments.filter((a) => a.id !== attachmentId);
     this.touch(task, actor);
-    await this.store.saveTask(task);
+    await this.store.saveTask(stored(task));
     await this.event({ taskId: task.id, type: "file_removed", actor, files: [att.name] });
   }
 
@@ -289,3 +377,9 @@ export class TaskService {
 
 let service: TaskService | null = null;
 export const tasks = () => (service ??= new TaskService());
+
+/** Adds who acts next ("ถึงตาใคร") to a task for pages and the CLI. */
+function label<T extends Task>(task: T): T {
+  const waiting = waitingOf(task);
+  return { ...task, waiting, waitingLabel: waitingLabel(waiting) };
+}

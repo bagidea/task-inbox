@@ -20,6 +20,10 @@ Team member ──(brief + files)──▶  Task Inbox (Next.js + Firestore/GCS 
 - **Tasks as markdown**: title, systems (configurable chips), priority, a brief typed or uploaded as `.md`, any files (30 MB each). Rendered with GFM.
 - **Timeline**: every change, comment, status move and Claude report is an event on the task. "Copy for chat" turns the latest report into plain text for LINE / Slack / Teams.
 - **Statuses**: `new → in_progress → review → done`, plus `needs_info` (a question for the team) and `cancelled`.
+- **ถึงตาใคร (who acts next)** (`src/lib/waiting.ts`): every task says who must do something now — "รอ Alice ตอบ", "รอ Bob ทดสอบ", "รอ Claude ทำ". It follows the status (`needs_info` → whoever filed it answers, `review` → whoever filed it tests, `new` / `in_progress` → Claude) and can be overridden on the task page or with `--wait <name> --wait-action ตอบ|ทดสอบ|อนุมัติ|ทำ`; when the awaited person comments, the turn goes back to Claude. Board filter **รอฉัน**.
+- **Installable app**: an install button on phones and computers (the browser's prompt where there is one, a how-to for iPhone / Safari / Firefox), hidden once installed. The manifest is dynamic.
+- **Branding**: app name, tab title, home-screen name, accent colour and logo are a workspace setting (Settings › หน้าตาแอป, admin only, stored in `meta/branding`). Defaults: "Task Inbox" and its own logo; `INBOX_NAME` only changes the default name.
+- **Phone-first layout**: no sideways page scroll at 360–430 px; code blocks, tables and chip rows scroll inside their own box.
 - **Accounts** created by an admin with a temporary password (no sign-up, no OAuth); personal API tokens for the CLI.
 - **CLI + Claude Code skill** (`public/skill/task-inbox/`): zero-dependency Node script. `list`, `show`, `pull`, `report`, `comment`, `create`, `status`, `upload`, `hold`. Installed with one command shown on the settings page.
 - **Automatic intake** (`src/lib/ready.ts`): a new task becomes *ready* when nobody on the team has touched it for a grace period (admin setting, default 10 min). "ส่งให้ Claude เลย" skips the wait; "หยุดก่อน" holds the task so Claude's reports are refused until the team presses "ให้ทำต่อ". `GET /api/tasks?ready=1` lists what Claude may take now.
@@ -44,7 +48,7 @@ Then open **Settings → Claude / CLI**, create a token, and run the install com
 
 | Variable | What |
 | --- | --- |
-| `INBOX_NAME` | Name shown in the title bar, exports and hand-over notes. Default `Task Inbox`. |
+| `INBOX_NAME` | Default app name (title bar, hand-over notes) until an admin sets one in Settings › หน้าตาแอป. Default `Task Inbox`. |
 | `INBOX_SYSTEMS` | The systems a task can be filed under, `key:Label` pairs separated by commas (keys `[a-z0-9-]`). Default `web:เว็บไซต์,backend:ระบบหลังบ้าน,mobile:แอปมือถือ,other:อื่น ๆ`. |
 | `INBOX_DEV_MODE` | `true` = JSON store (`INBOX_DATA_FILE`) + files on disk (`INBOX_FILES_DIR`), setup code `setup`. Ignored in production. |
 | `SESSION_SECRET` | Long random string that signs the login cookie. Required in production. |
@@ -63,7 +67,7 @@ All of these are read at request time, so one container image serves any team.
 | `/` | Board: open / new / needs info / review / done tabs, search, system filter. Refreshes every 30 s. |
 | `/new` | Create a task. |
 | `/t/T-12` | The task: brief, files, status buttons, hold / ready-now, timeline, copy for chat. |
-| `/settings` | Password, API tokens + install commands, grace period, team management (admin). |
+| `/settings` | Install the app, password, API tokens + install commands, grace period, branding and team management (admin). |
 | `/setup` | First run: the admin account, unlocked with `SETUP_CODE`. |
 | `/skill/task-inbox/`, `/skill/task-inbox-auto/` | The Claude Code skills served as static files. |
 | `/api/health` | What is configured (never the values). |
@@ -76,7 +80,7 @@ Cookie session for the browser; `Authorization: Bearer tin_…` for the CLI (tok
 | --- | --- |
 | `GET /api/tasks?status=new,needs_info&system=web&q=…` | List. `?ready=1`: new tasks past the grace period and not held, most urgent first. |
 | `POST /api/tasks` | Create (JSON `{title, body, systems, priority}` or multipart with `brief` .md and `files`). |
-| `GET/PATCH /api/tasks/:id` | Task + events / edit title, body, systems, priority, status, links. |
+| `GET/PATCH /api/tasks/:id` | Task + events / edit title, body, systems, priority, status, links, `wait: {who, action}` (`who` = names, `claude`, `owner`, `auto`, `none`; also on comments and reports). |
 | `POST /api/tasks/:id/comments` `{text, status?}` | Comment. 409 `on-hold` for `X-Actor: claude` while the hold is on (`?force=1` overrides). |
 | `POST /api/tasks/:id/report` `{text, status?, links?}` | Summary from the work session (default status → review). |
 | `POST /api/tasks/:id/pull` | Mark in progress; returns `task.md`, a folder name and a download URL per file. |
@@ -85,6 +89,8 @@ Cookie session for the browser; `Authorization: Bearer tin_…` for the CLI (tok
 | `GET /api/tasks/:id/export` | `task.md`. |
 | `POST /api/tasks/:id/files`, `GET/DELETE /api/tasks/:id/files/:fid` | Attachments. |
 | `GET/PATCH /api/settings` `{graceMinutes}` | Admin: the grace period. |
+| `GET /api/branding`, `PATCH` `{name, shortName, title, accent, logo}` | Branding (GET public, PATCH admin; `""` = back to default). `/manifest.webmanifest` and `/brand/icon` follow it. |
+| `GET /api/team` | Signed-in: the team's names (for the "ถึงตาใคร" picker). |
 | `POST /api/auth/login`, `/logout`, `/password`, `GET /api/me` | Session. |
 | `GET/POST /api/users`, `PATCH /api/users/:id` | Admin: the team. |
 | `GET/POST /api/tokens`, `DELETE /api/tokens/:id` | My API tokens. |
@@ -117,6 +123,9 @@ Any host that runs a Node 22 container works. `docs/deploy-cloud-run.md` walks t
 | `src/lib/systems.ts` | `INBOX_SYSTEMS` / `INBOX_NAME` parsing (runtime). |
 | `src/lib/tasks.ts` | The service: create, update, comment, pull, report, files, hold, ready-now. Every change writes its timeline event. |
 | `src/lib/ready.ts` | Readiness and hold rules. Pure. |
+| `src/lib/waiting.ts` | "ถึงตาใคร": who acts next by status, overrides, flip on the awaited person's comment. Pure. |
+| `src/lib/branding.ts`, `brand-server.ts` | Name / title / accent / logo defaults, checks, cached server read. |
+| `brand/`, `public/icon.svg` | The logo (an inbox tray with a check) and `make-icons.cjs`, which renders the PNG icons from the SVGs. |
 | `src/lib/export.ts` | `task.md` for the job folder; date formatting; event wording. |
 | `src/lib/auth.ts`, `src/lib/server.ts` | scrypt passwords, API tokens, signed session cookie, rate limit, same-origin check, `caller()`. |
 | `src/lib/store/` | `Store` interface, Firestore and JSON-file implementations. |
@@ -146,3 +155,5 @@ Task Inbox คือเว็บรับงานเล็ก ๆ สำหร�
 - ติดตั้ง skill ให้ Claude Code ด้วยคำสั่งเดียวจากหน้า ตั้งค่า แล้วพิมพ์ "รับงานจาก task inbox" หรือ `/task-inbox-auto on`
 - รันบนโน้ตบุ๊กด้วย `INBOX_DEV_MODE=true` (ไม่ต้องมี Firestore) หรือขึ้น Cloud Run ตาม `docs/deploy-cloud-run.md`
 - ตั้งชื่อระบบของทีมเองด้วย `INBOX_SYSTEMS=web:เว็บไซต์,backend:ระบบหลังบ้าน,…`
+- ทุกงานบอก **ถึงตาใคร** เช่น "รอ Alice ตอบ", "รอ Bob ทดสอบ", "รอ Claude ทำ" ตามสถานะ เปลี่ยนเองได้ที่หน้างานหรือ `--wait` ใน CLI · ตัวกรอง **รอฉัน** ที่หน้ารวมงาน
+- ปุ่ม **ติดตั้งแอป / เพิ่มไปหน้าจอหลัก** บนมือถือและคอม · ผู้ดูแลตั้งชื่อแอป สี และโลโก้ได้ที่ ตั้งค่า › หน้าตาแอป

@@ -5,6 +5,8 @@
  */
 
 /** A system / area a task belongs to. The list is configured per deployment (`INBOX_SYSTEMS`, see `systems.ts`). */
+import type { Waiting } from "./waiting";
+
 export type System = string;
 export interface SystemDef { key: string; label: string }
 
@@ -103,13 +105,19 @@ export interface Task {
   readyAt?: string;
   /** "หยุดก่อน": the team wants Claude to stop and read the new comments before going on. */
   hold?: Hold;
+  /** Who acts next, when it differs from the rules (`src/lib/waiting.ts`); only counts while its `status` matches. */
+  waitingOn?: Waiting;
+  /** Computed on read: who acts next now (the override or the rules), null when nobody. */
+  waiting?: Waiting | null;
+  /** Computed on read: "รอ Alice ตอบ". */
+  waitingLabel?: string | null;
 }
 
 export interface Hold { active: boolean; by: string; at: string; note?: string }
 
 export interface TaskLink { label: string; url: string }
 
-export type EventType = "created" | "comment" | "status" | "edit" | "file_added" | "file_removed" | "pulled" | "report" | "priority" | "ready_now" | "hold" | "resume";
+export type EventType = "created" | "comment" | "status" | "edit" | "file_added" | "file_removed" | "pulled" | "report" | "priority" | "ready_now" | "hold" | "resume" | "waiting";
 
 export interface TaskEvent {
   id: string;

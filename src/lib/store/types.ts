@@ -1,3 +1,4 @@
+import type { Branding } from "@/lib/branding";
 import type { InboxSettings } from "@/lib/ready";
 import type { ApiToken, Task, TaskEvent, TaskFilter, User } from "@/lib/types";
 
@@ -24,4 +25,7 @@ export interface Store {
   // settings (one document)
   getSettings(): Promise<Partial<InboxSettings> | null>;
   saveSettings(s: InboxSettings): Promise<void>;
+  // branding (one document: name, colours, logo)
+  getBranding(): Promise<Partial<Branding> | null>;
+  saveBranding(b: Partial<Branding>): Promise<void>;
 }

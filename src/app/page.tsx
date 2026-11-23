@@ -10,7 +10,7 @@ export default async function Home() {
   const list = await tasks().list({ limit: 500 });
   return (
     <Shell user={user}>
-      <Board initialTasks={list} />
+      <Board initialTasks={list} user={user} />
     </Shell>
   );
 }

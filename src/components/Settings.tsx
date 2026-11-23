@@ -2,7 +2,9 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { CopyButton, Notice, Spinner } from "./bits";
 import type { PublicUser } from "@/lib/types";
+import { Mark, useBrand } from "./Brand";
 import { useInboxConfig } from "./config";
+import { InstallCard } from "./PhoneApp";
 import { api, fmtDateTime } from "@/lib/ui";
 
 interface TokenInfo { id: string; name: string; prefix: string; createdAt: string; lastUsedAt?: string }
@@ -15,6 +17,8 @@ export function Settings({ user, baseUrl, changePasswordFirst }: { user: PublicU
         <p className="mt-1 text-sm text-mist">{user.name} · {user.email} · {user.role === "admin" ? "ผู้ดูแล" : "สมาชิกทีม"}</p>
       </div>
       {changePasswordFirst && <Notice kind="info">นี่เป็นรหัสผ่านชั่วคราว กรุณาตั้งรหัสผ่านใหม่ก่อนใช้งาน</Notice>}
+      <InstallCard />
+      {user.role === "admin" && <BrandingCard />}
       <Password />
       <Tokens baseUrl={baseUrl} />
       {user.role === "admin" && <AutoIntake />}
@@ -45,6 +49,66 @@ function Password() {
         <div><label className="label">ยืนยันอีกครั้ง</label><input className="field" type="password" autoComplete="new-password" value={f.again} onChange={(e) => setF({ ...f, again: e.target.value })} required /></div>
       </div>
       <button className="btn btn-ghost btn-sm" disabled={busy}>{busy ? <Spinner /> : "เปลี่ยนรหัสผ่าน"}</button>
+    </form>
+  );
+}
+
+/** Owner/admin: what the inbox calls itself and how it looks (name, tab title, home-screen name, accent colour, logo). */
+function BrandingCard() {
+  const current = useBrand();
+  const [f, setF] = useState({ name: current.name, shortName: current.shortName, title: current.title, accent: current.accent });
+  const [logo, setLogo] = useState<string | null>(null); // null = unchanged, "" = back to the built-in logo
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  async function pick(file: File | undefined) {
+    if (!file) return;
+    if (file.size > 200 * 1024) { setMsg({ kind: "error", text: "โลโก้ใหญ่เกิน 200 KB" }); return; }
+    const url = await new Promise<string>((ok, bad) => { const r = new FileReader(); r.onload = () => ok(String(r.result)); r.onerror = () => bad(r.error); r.readAsDataURL(file); });
+    setLogo(url);
+  }
+  async function save(body: Record<string, unknown>, done: string) {
+    setBusy(true); setMsg(null);
+    try {
+      await api("/api/branding", { method: "PATCH", body: JSON.stringify(body) });
+      setMsg({ kind: "ok", text: done });
+      window.setTimeout(() => window.location.reload(), 700);
+    } catch (err) { setMsg({ kind: "error", text: (err as Error).message }); }
+    finally { setBusy(false); }
+  }
+  const preview = logo ?? (current.hasLogo ? current.logoUrl : "");
+  return (
+    <form onSubmit={(e) => { e.preventDefault(); save({ ...f, ...(logo !== null ? { logo } : {}) }, "บันทึกแล้ว กำลังโหลดใหม่…"); }} className="card space-y-4 p-5">
+      <div>
+        <h2 className="font-semibold">หน้าตาแอป (ชื่อ · สี · โลโก้)</h2>
+        <p className="mt-1 text-sm text-mist">ค่าเริ่มต้นคือ Task Inbox กับโลโก้ของ Task Inbox เอง (หรือ INBOX_NAME) ตั้งเป็นชื่อทีมหรือแบรนด์ได้ ใช้กับหัวเว็บ ชื่อแท็บ และไอคอนบนหน้าจอ — แอปที่ติดตั้งไว้แล้วอาจต้องติดตั้งใหม่ถึงจะเห็นชื่อ/ไอคอนใหม่</p>
+      </div>
+      {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div><label className="label">ชื่อแอป</label><input className="field" value={f.name} maxLength={60} onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="Task Inbox" /></div>
+        <div><label className="label">ชื่อใต้ไอคอน (สั้น ๆ)</label><input className="field" value={f.shortName} maxLength={24} onChange={(e) => setF({ ...f, shortName: e.target.value })} placeholder="Task Inbox" /></div>
+        <div><label className="label">ชื่อบนแท็บเบราว์เซอร์</label><input className="field" value={f.title} maxLength={80} onChange={(e) => setF({ ...f, title: e.target.value })} placeholder="Task Inbox" /></div>
+        <div>
+          <label className="label">สีหลัก</label>
+          <div className="flex items-center gap-2">
+            <input type="color" className="h-10 w-12 shrink-0 cursor-pointer rounded-lg border border-line bg-ink-3" value={f.accent} onChange={(e) => setF({ ...f, accent: e.target.value })} aria-label="เลือกสี" />
+            <input className="field font-mono" value={f.accent} maxLength={7} onChange={(e) => setF({ ...f, accent: e.target.value })} />
+          </div>
+        </div>
+      </div>
+      <div>
+        <span className="label">โลโก้ (PNG / JPG / WebP / SVG ไม่เกิน 200 KB, สี่เหลี่ยมจัตุรัส 512×512 ขึ้นไปดีที่สุด)</span>
+        <div className="flex flex-wrap items-center gap-3">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          {preview ? <img src={preview} alt="" className="size-14 rounded-2xl object-contain" /> : <Mark className="size-14" />}
+          <label className="btn btn-ghost btn-sm cursor-pointer">เลือกไฟล์โลโก้<input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" className="hidden" onChange={(e) => { pick(e.target.files?.[0]); e.target.value = ""; }} /></label>
+          {(preview || logo !== null) && <button type="button" className="btn btn-ghost btn-sm" onClick={() => setLogo("")}>ใช้โลโก้ Task Inbox</button>}
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <button className="btn btn-lime btn-sm" disabled={busy}>{busy ? <Spinner /> : "บันทึก"}</button>
+        <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { if (window.confirm("กลับไปใช้ชื่อ สี และโลโก้เริ่มต้นของ Task Inbox?")) save({ name: "", shortName: "", title: "", accent: "", logo: "" }, "กลับเป็นค่าเริ่มต้นแล้ว กำลังโหลดใหม่…"); }}>กลับเป็นค่าเริ่มต้น</button>
+      </div>
+      {current.updatedBy && <p className="text-xs text-mist">แก้ล่าสุดโดย {current.updatedBy}</p>}
     </form>
   );
 }
@@ -128,7 +192,7 @@ function Tokens({ baseUrl }: { baseUrl: string }) {
       )}
       <ul className="divide-y divide-line">
         {tokens.map((t) => (
-          <li key={t.id} className="flex items-center gap-3 py-2 text-sm">
+          <li key={t.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 text-sm">
             <span className="font-mono text-xs text-mist">{t.prefix}…</span>
             <span className="font-medium">{t.name}</span>
             <span className="text-xs text-mist">สร้าง {fmtDateTime(t.createdAt)}{t.lastUsedAt ? ` · ใช้ล่าสุด ${fmtDateTime(t.lastUsedAt)}` : ""}</span>
@@ -137,8 +201,8 @@ function Tokens({ baseUrl }: { baseUrl: string }) {
         ))}
         {tokens.length === 0 && <li className="py-2 text-sm text-mist">ยังไม่มี token</li>}
       </ul>
-      <form onSubmit={create} className="flex gap-2">
-        <input className="field" placeholder="ชื่อเครื่อง เช่น โน้ตบุ๊กทำงาน" value={name} onChange={(e) => setName(e.target.value)} maxLength={60} />
+      <form onSubmit={create} className="flex min-w-0 gap-2">
+        <input className="field min-w-0" placeholder="ชื่อเครื่อง เช่น โน้ตบุ๊กทำงาน" value={name} onChange={(e) => setName(e.target.value)} maxLength={60} />
         <button className="btn btn-lime btn-sm shrink-0" disabled={busy}>{busy ? <Spinner /> : "สร้าง token"}</button>
       </form>
       <details className="text-sm text-fog" open>

@@ -30,6 +30,7 @@ export function describeEvent(e: TaskEvent): string {
     case "ready_now": return "ส่งให้ Claude เลย (ไม่รอช่วงพัก)";
     case "hold": return `กด "หยุดก่อน"${e.text ? ` — ${e.text}` : ""}`;
     case "resume": return `กด "ให้ทำต่อ"${e.text ? ` — ${e.text}` : ""}`;
+    case "waiting": return `ถึงตา: ${e.to ?? "ไม่มีใคร"}`;
   }
 }
 
@@ -40,6 +41,7 @@ export function taskMarkdown(task: Task, events: TaskEvent[], baseUrl: string, l
   lines.push(`- สถานะ: ${STATUS_LABEL[task.status]}`);
   lines.push(`- ความเร่งด่วน: ${PRIORITY_LABEL[task.priority]}`);
   lines.push(`- ระบบ: ${task.systems.length ? task.systems.map(label).join(", ") : "-"}`);
+  if (task.waitingLabel) lines.push(`- ถึงตาใคร: ${task.waitingLabel}`);
   lines.push(`- ผู้สั่งงาน: ${task.createdBy.name} (${fmtDate(task.createdAt)})`);
   lines.push(`- แก้ไขล่าสุด: ${fmtDate(task.updatedAt)}`);
   lines.push(`- หน้างาน: ${baseUrl}/t/${task.id}`);
@@ -50,7 +52,7 @@ export function taskMarkdown(task: Task, events: TaskEvent[], baseUrl: string, l
   if (!task.attachments.length) lines.push("_(ไม่มี)_");
   for (const a of task.attachments) lines.push(`- \`files/${a.name}\` (${fmtSize(a.size)}, ${a.uploadedBy.name}, ${fmtDate(a.uploadedAt, false)})`);
   lines.push("");
-  const talk = events.filter((e) => e.type === "comment" || e.type === "report" || e.type === "status" || e.type === "priority" || e.type === "hold" || e.type === "resume");
+  const talk = events.filter((e) => e.type === "comment" || e.type === "report" || e.type === "status" || e.type === "priority" || e.type === "hold" || e.type === "resume" || e.type === "waiting");
   lines.push("## ความเห็นและสรุปที่ผ่านมา", "");
   if (!talk.length) lines.push("_(ยังไม่มี)_");
   for (const e of talk) {
