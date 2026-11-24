@@ -100,12 +100,20 @@ export class TaskService {
     return next;
   }
 
-  private async decorate<T extends Task>(task: T): Promise<T> { return label(withReadiness(task, (await this.settings()).graceMinutes)); }
+  private async decorate<T extends Task>(task: T): Promise<T> { return label(withReadiness(task, (await this.settings()).graceMinutes), await this.claudeName()); }
 
   /** The first admin: the person whose Claude does the work ("owner" in `--wait owner`). */
-  private async ownerId(): Promise<string | null> {
+  private async owner() {
     const admins = (await this.store.listUsers()).filter((u) => u.role === "admin" && !u.disabled).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    return admins[0]?.id ?? null;
+    return admins[0] ?? null;
+  }
+
+  private async ownerId(): Promise<string | null> { return (await this.owner())?.id ?? null; }
+
+  /** Whose Claude: "Alice (Claude)", or plain "Claude" before anyone signs up. */
+  private async claudeName(): Promise<string> {
+    const o = await this.owner();
+    return o ? `${o.name} (Claude)` : "Claude";
   }
 
   /**
@@ -149,9 +157,10 @@ export class TaskService {
   /** Puts a "ถึงตาใคร" request on the task (saved by the caller) and writes its timeline line. */
   private async applyWait(task: Task, input: WaitInput, actor: Actor): Promise<void> {
     const next = await this.resolveWait(task, input);
-    const before = waitingLabel(waitingOf(task));
+    const claudeName = await this.claudeName();
+    const before = waitingLabel(waitingOf(task), claudeName);
     if (next) task.waitingOn = next; else delete task.waitingOn;
-    const after = waitingLabel(waitingOf(task));
+    const after = waitingLabel(waitingOf(task), claudeName);
     if (after !== before) await this.event({ taskId: task.id, type: "waiting", actor, ...(before ? { from: before } : {}), to: after ?? "ไม่มีใคร" });
   }
 
@@ -191,14 +200,16 @@ export class TaskService {
 
   async list(filter: TaskFilter): Promise<Task[]> {
     const grace = (await this.settings()).graceMinutes;
-    return (await this.store.listTasks(filter)).map((t) => label(withReadiness(t, grace)));
+    const cn = await this.claudeName();
+    return (await this.store.listTasks(filter)).map((t) => label(withReadiness(t, grace), cn));
   }
 
   /** New tasks Claude may take right now, most urgent first (`GET /api/tasks?ready=1`, `task-inbox list --ready`). */
   async listReady(now = Date.parse(this.now())): Promise<Task[]> {
     const grace = (await this.settings()).graceMinutes;
+    const cn = await this.claudeName();
     const fresh = await this.store.listTasks({ status: ["new"] });
-    return sortReady(fresh.filter((t) => isReady(t, grace, now)), grace).map((t) => label(withReadiness(t, grace)));
+    return sortReady(fresh.filter((t) => isReady(t, grace, now)), grace).map((t) => label(withReadiness(t, grace), cn));
   }
 
   events(taskId: string) { return this.store.listEvents(taskId); }
@@ -379,7 +390,7 @@ let service: TaskService | null = null;
 export const tasks = () => (service ??= new TaskService());
 
 /** Adds who acts next ("ถึงตาใคร") to a task for pages and the CLI. */
-function label<T extends Task>(task: T): T {
+function label<T extends Task>(task: T, claudeName: string): T {
   const waiting = waitingOf(task);
-  return { ...task, waiting, waitingLabel: waitingLabel(waiting) };
+  return { ...task, waiting, waitingLabel: waitingLabel(waiting, claudeName) };
 }

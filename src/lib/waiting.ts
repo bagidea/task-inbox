@@ -71,12 +71,15 @@ export function waitingOf(task: Pick<Task, "status" | "createdBy" | "waitingOn">
   return deriveWaiting(task);
 }
 
-const targetName = (t: WaitTarget) => (t.kind === "claude" ? "Claude" : t.name);
+const targetName = (t: WaitTarget, claudeName: string) => (t.kind === "claude" ? claudeName : t.name);
 
-/** "รอ Alice ตอบ", "รอ Alice + Bob ทดสอบ"; null when nobody is awaited. */
-export function waitingLabel(w: Waiting | null): string | null {
+/**
+ * "รอ Alice ตอบ", "รอ Alice + Bob ทดสอบ", "รอ Alice (Claude) ทำ"; null when nobody is awaited.
+ * `claudeName` says whose Claude has the turn (the owner's).
+ */
+export function waitingLabel(w: Waiting | null, claudeName = "Claude"): string | null {
   if (!w || !w.who.length) return null;
-  return `รอ ${w.who.map(targetName).join(" + ")} ${WAIT_ACTION_LABEL[w.action]}`;
+  return `รอ ${w.who.map((t) => targetName(t, claudeName)).join(" + ")} ${WAIT_ACTION_LABEL[w.action]}`;
 }
 
 /** Is it this signed-in person's turn ("รอฉัน")? Claude's turns are Claude's, not the owner's. */

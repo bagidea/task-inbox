@@ -25,6 +25,7 @@ describe("ถึงตาใคร: the rules", () => {
     expect(waitingLabel(deriveWaiting({ ...base, status: "needs_info" }))).toBe("รอ Alice ตอบ");
     expect(waitingLabel(deriveWaiting({ ...base, status: "review" }))).toBe("รอ Alice ทดสอบ");
     expect(waitingLabel(deriveWaiting({ ...base, status: "in_progress" }))).toBe("รอ Claude ทำ");
+    expect(waitingLabel(deriveWaiting({ ...base, status: "in_progress" }), "Owner (Claude)")).toBe("รอ Owner (Claude) ทำ");
     expect(deriveWaiting({ ...base, status: "done" })).toBeNull();
   });
 
@@ -48,11 +49,11 @@ describe("ถึงตาใคร: on tasks", () => {
   it("labels every read, moves with the status, flips on the awaited person's comment, can be set / reset / cleared", async () => {
     const { s, store } = await svc();
     const t = await s.create({ title: "ปุ่มจ่ายเงิน", body: "", systems: ["web"], priority: "high" }, alice);
-    expect(t.waitingLabel).toBe("รอ Claude ทำ");
+    expect(t.waitingLabel).toBe("รอ Owner (Claude) ทำ");
     await s.comment(t.id, "ขอภาพหน้าจอ", claude, "needs_info");
     expect((await s.get(t.id)).waitingLabel).toBe("รอ Alice ตอบ");
     await s.comment(t.id, "ส่งแล้ว", alice);
-    expect((await s.get(t.id)).waitingLabel).toBe("รอ Claude ทำ");
+    expect((await s.get(t.id)).waitingLabel).toBe("รอ Owner (Claude) ทำ");
     await s.report(t.id, "เสร็จแล้ว", claude, { wait: { who: "bob", action: "ทดสอบ" } });
     expect((await s.get(t.id)).waitingLabel).toBe("รอ Bob ทดสอบ");
     await s.update(t.id, { wait: { who: "auto" } }, owner);
