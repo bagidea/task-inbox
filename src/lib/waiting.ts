@@ -13,7 +13,7 @@
  * people doing the task. Tasks stored before this existed are derived on read.
  * Pure.
  */
-import type { Actor, Status, Task } from "./types";
+import { isOwnerClaude, type Actor, type Status, type Task } from "./types";
 
 export const WAIT_ACTIONS = ["answer", "test", "approve", "do"] as const;
 export type WaitAction = (typeof WAIT_ACTIONS)[number];
@@ -43,9 +43,10 @@ export interface Waiting {
   at?: string;
 }
 
-/** The person who filed the task; Claude when the CLI filed it as Claude. */
-export function requesterOf(task: Pick<Task, "createdBy">): WaitTarget {
-  return task.createdBy.kind === "claude" ? { kind: "claude" } : { kind: "user", id: task.createdBy.id, name: task.createdBy.name };
+/** The person who filed the task (also through their own Claude); Claude when the owner's Claude filed it. */
+export function requesterOf(task: Pick<Task, "createdBy">, ownerId?: string | null): WaitTarget {
+  const by = task.createdBy;
+  return isOwnerClaude(by, ownerId) ? { kind: "claude" } : { kind: "user", id: by.id, name: by.name.replace(/ \(Claude\)$/, "").replace(/^Claude \((.+)\)$/, "$1") };
 }
 
 /** The people doing the task: in this inbox, Claude (working for the inbox owner). */
@@ -54,10 +55,10 @@ export function doersOf(task?: unknown): WaitTarget[] {
   return [{ kind: "claude" }];
 }
 
-export function deriveWaiting(task: Pick<Task, "status" | "createdBy">): Waiting | null {
+export function deriveWaiting(task: Pick<Task, "status" | "createdBy">, ownerId?: string | null): Waiting | null {
   switch (task.status) {
-    case "needs_info": return { who: [requesterOf(task)], action: "answer", status: task.status };
-    case "review": return { who: [requesterOf(task)], action: "test", status: task.status };
+    case "needs_info": return { who: [requesterOf(task, ownerId)], action: "answer", status: task.status };
+    case "review": return { who: [requesterOf(task, ownerId)], action: "test", status: task.status };
     case "new":
     case "in_progress": return { who: doersOf(task), action: "do", status: task.status };
     default: return null;
@@ -65,10 +66,10 @@ export function deriveWaiting(task: Pick<Task, "status" | "createdBy">): Waiting
 }
 
 /** What applies now: an override set in this status, or the rules. An override with nobody means "nobody". */
-export function waitingOf(task: Pick<Task, "status" | "createdBy" | "waitingOn">): Waiting | null {
+export function waitingOf(task: Pick<Task, "status" | "createdBy" | "waitingOn">, ownerId?: string | null): Waiting | null {
   const stored = task.waitingOn;
   if (stored && stored.status === task.status) return stored.who.length ? stored : null;
-  return deriveWaiting(task);
+  return deriveWaiting(task, ownerId);
 }
 
 const targetName = (t: WaitTarget, claudeName: string) => (t.kind === "claude" ? claudeName : t.name);
@@ -91,8 +92,10 @@ export function isWaitingOn(w: Waiting | null | undefined, userId: string): bool
 export function actorIsAwaited(w: Waiting | null, actor: Pick<Actor, "id" | "kind">, ownerId?: string | null): boolean {
   if (!w) return false;
   // Claude writes with the owner's token, so only a person-kind entry counts as the person answering.
+  // A teammate's Claude ("Bob (Claude)") answers for that teammate.
+  const ours = isOwnerClaude(actor, ownerId);
   const ownerInPerson = actor.kind === "user" && Boolean(ownerId) && actor.id === ownerId;
-  return w.who.some((t) => (t.kind === "claude" ? actor.kind === "claude" || ownerInPerson : actor.kind === "user" && t.id === actor.id));
+  return w.who.some((t) => (t.kind === "claude" ? ours || ownerInPerson : !ours && t.id === actor.id));
 }
 
 const key = (list: WaitTarget[]) => list.map((t) => (t.kind === "claude" ? "claude" : t.id)).sort().join(",");
@@ -106,7 +109,7 @@ export const sameTargets = (a: WaitTarget[], b: WaitTarget[]) => key(a) === key(
  * Returns the new stored value, or undefined when nothing changes.
  */
 export function afterComment(task: Pick<Task, "status" | "createdBy" | "waitingOn">, actor: Pick<Actor, "id" | "kind">, ownerId: string | null | undefined, at: string): Waiting | undefined {
-  const w = waitingOf(task);
+  const w = waitingOf(task, ownerId);
   if (!w || !actorIsAwaited(w, actor, ownerId)) return undefined;
   const doers = doersOf(task);
   if (sameTargets(w.who, doers)) return undefined;

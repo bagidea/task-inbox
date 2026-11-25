@@ -94,6 +94,9 @@ export const isResponse = (x: unknown): x is NextResponse => x instanceof NextRe
 /** `?force=1`: Claude may write to a held task anyway (the CLI option --force). */
 export const forced = (request: Request) => new URL(request.url).searchParams.get("force") === "1";
 
+/** `seenAt` in a body: up to when the CLI's Claude had read the task (its last `show` / `pull`). */
+export const seenFrom = (b: Record<string, unknown>): string | undefined => (typeof b.seenAt === "string" && Number.isFinite(Date.parse(b.seenAt)) ? new Date(b.seenAt).toISOString() : undefined);
+
 /** Runs a handler and turns TaskErrors into their status. */
 export async function handle(fn: () => Promise<NextResponse>): Promise<NextResponse> {
   try {

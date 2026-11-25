@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { claudeIsStale } from "@/lib/ready";
 import { MemoryStore } from "@/lib/store/memory";
 import { TaskService, waitFromBody } from "@/lib/tasks";
 import type { Actor, User } from "@/lib/types";
@@ -64,6 +65,56 @@ describe("ถึงตาใคร: on tasks", () => {
     expect((await s.events(t.id)).filter((e) => e.type === "waiting").map((e) => e.to)).toEqual(["รอ Bob ทดสอบ", "รอ Alice ทดสอบ", "ไม่มีใคร"]);
     const raw = await store.getTask(t.id);
     expect(raw && "waitingLabel" in raw).toBe(false);
+  });
+
+  it("a teammate's Claude speaks for that teammate: the turn flips and the owner's Claude gets it on its attention list", async () => {
+    const { s } = await svc();
+    const bobsClaude: Actor = { id: "u-bob", name: "Bob (Claude)", kind: "claude" };
+    const t = await s.create({ title: "Security", body: "", systems: ["web"], priority: "urgent" }, bob);
+    await s.pull(t.id, claude);
+    await s.comment(t.id, "ขออนุมัติ", claude, "needs_info", { wait: { who: "Bob", action: "อนุมัติ" } });
+    expect((await s.get(t.id)).waitingLabel).toBe("รอ Bob อนุมัติ");
+    expect(await s.listAttention()).toEqual([]);
+    await s.comment(t.id, "อนุมัติทั้งหมด", bobsClaude);
+    expect((await s.get(t.id)).waitingLabel).toBe("รอ Owner (Claude) ทำ");
+    expect((await s.listAttention()).map((x) => x.id)).toEqual([t.id]);
+    await s.comment(t.id, "รับทราบ", claude);
+    expect(await s.listAttention()).toEqual([]);
+    const filed = await s.create({ title: "filed by Bob's Claude", body: "", systems: [], priority: "normal" }, bobsClaude);
+    await s.report(filed.id, "เสร็จ", claude);
+    expect((await s.get(filed.id)).waitingLabel).toBe("รอ Bob ทดสอบ");
+  });
+
+  it("a comment that arrives while Claude writes stays unread; done tasks come back only for a comment; a hold stops only the owner's Claude", async () => {
+    const { s } = await svc();
+    const bobsClaude: Actor = { id: "u-bob", name: "Bob (Claude)", kind: "claude" };
+    const t = await s.create({ title: "x", body: "", systems: [], priority: "normal" }, bob);
+    const shown = (await s.pull(t.id, claude)).updatedAt;
+    await s.comment(t.id, "เพิ่มเติม", bobsClaude);
+    await s.comment(t.id, "ความคืบหน้า", claude, undefined, { seenAt: shown });
+    expect((await s.listAttention()).map((x) => x.id)).toEqual([t.id]);
+    await s.update(t.id, {}, claude, { seenAt: (await s.get(t.id)).updatedAt });
+    expect(await s.listAttention()).toEqual([]);
+    await s.report(t.id, "เสร็จ", claude);
+    await s.update(t.id, { status: "done" }, bob);
+    expect(await s.listAttention()).toEqual([]);
+    await s.comment(t.id, "ยังไม่หาย", alice);
+    expect((await s.listAttention()).map((x) => x.id)).toEqual([t.id]);
+    await s.setHold(t.id, true, bob);
+    await expect(s.comment(t.id, "y", claude)).rejects.toMatchObject({ status: 409 });
+    await s.comment(t.id, "คำตอบ", bobsClaude);
+  });
+
+  it("remembers when the owner's Claude last asked for work, and keeps it when the settings change", async () => {
+    const { s } = await svc();
+    await s.notePoll("u-bob");
+    expect((await s.claudeInfo()).polledAt).toBeUndefined();
+    await s.notePoll("u-owner");
+    const at = (await s.claudeInfo()).polledAt!;
+    await s.saveSettings({ graceMinutes: 5 });
+    expect((await s.claudeInfo()).polledAt).toBe(at);
+    expect(claudeIsStale(at, Date.parse(at) + 60 * 60_000)).toBe(false);
+    expect(claudeIsStale(at, Date.parse(at) + 80 * 60_000)).toBe(true);
   });
 
   it("request bodies: nested wait or flat waitOn / waitAction", () => {

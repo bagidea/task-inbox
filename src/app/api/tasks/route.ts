@@ -5,13 +5,16 @@ import type { Status } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-/** `?status=new,needs_info&system=mira&q=…&limit=50` — or `?ready=1`: the new tasks Claude may take now, most urgent first. */
+/** `?status=new,needs_info&system=web&q=…&limit=50` — or `?ready=1`: the new tasks Claude may take now, most urgent first — or `?attention=1`: tasks where the team wrote something Claude has not read. */
 export async function GET(request: Request) {
   return handle(async () => {
     const c = await requireCaller(request);
     if (isResponse(c)) return c;
     const url = new URL(request.url);
-    if (url.searchParams.get("ready") === "1") return json({ tasks: await tasks().listReady() });
+    const ready = url.searchParams.get("ready") === "1", attention = url.searchParams.get("attention") === "1";
+    if (c.via === "token" && (ready || attention)) await tasks().notePoll(c.user.id);
+    if (ready) return json({ tasks: await tasks().listReady() });
+    if (attention) return json({ tasks: await tasks().listAttention() });
     const status = (url.searchParams.get("status") ?? "").split(",").map((s) => s.trim()).filter(isStatus) as Status[];
     const systems = parseSystems(url.searchParams.get("system") ?? "");
     const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") ?? 200) || 200));

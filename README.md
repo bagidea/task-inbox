@@ -78,7 +78,7 @@ Cookie session for the browser; `Authorization: Bearer tin_…` for the CLI (tok
 
 | Method, path | What |
 | --- | --- |
-| `GET /api/tasks?status=new,needs_info&system=web&q=…` | List. `?ready=1`: new tasks past the grace period and not held, most urgent first. |
+| `GET /api/tasks?status=new,needs_info&system=web&q=…` | List. `?ready=1`: new tasks past the grace period and not held, most urgent first. `?attention=1`: tasks where the team (or a teammate's own Claude) wrote something the owner's Claude has not read. |
 | `POST /api/tasks` | Create (JSON `{title, body, systems, priority}` or multipart with `brief` .md and `files`). |
 | `GET/PATCH /api/tasks/:id` | Task + events / edit title, body, systems, priority, status, links, `wait: {who, action}` (`who` = names, `claude`, `owner`, `auto`, `none`; also on comments and reports). |
 | `POST /api/tasks/:id/comments` `{text, status?}` | Comment. 409 `on-hold` for `X-Actor: claude` while the hold is on (`?force=1` overrides). |
@@ -99,8 +99,9 @@ Cookie session for the browser; `Authorization: Bearer tin_…` for the CLI (tok
 
 ```
 node ~/.claude/skills/task-inbox/task-inbox.mjs config --url https://inbox.example.com --token tin_…
-task-inbox list [--status open|new,needs_info|all] [--system web] [--ready] [--json]
-task-inbox show T-12
+task-inbox list [--status open|new,needs_info|all] [--system web] [--ready | --attention] [--json]
+task-inbox show T-12 [--new]                                     # --new: only what Claude has not read
+task-inbox seen T-12 --as-claude                                 # read, nothing to answer
 task-inbox pull T-12 | next [--ready] [--out DIR] --as-claude     # → NewJob/<date>_T-12/{task.md, task.json, files/}
 task-inbox hold T-12                                              # {"active":false} or {"active":true,"by":…,"note":…}
 task-inbox report T-12 --file summary.md [--status review|needs_info|done] [--link "Name=https://…"] --as-claude

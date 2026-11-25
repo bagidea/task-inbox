@@ -8,7 +8,7 @@ export async function GET(request: Request) {
   return handle(async () => {
     const c = await requireCaller(request);
     if (isResponse(c)) return c;
-    return json({ settings: await tasks().settings() });
+    return json({ settings: await tasks().settings(), claude: await tasks().claudeInfo() });
   });
 }
 

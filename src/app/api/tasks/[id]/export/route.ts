@@ -14,6 +14,6 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     const task = await tasks().get(id);
     const events = await tasks().events(task.id);
     const md = taskMarkdown(task, events, baseUrlOf(request), systemLabel);
-    return new Response(md, { headers: { "content-type": "text/markdown; charset=utf-8", "content-disposition": `attachment; filename="${task.id}.md"`, "cache-control": "no-store" } }) as never;
+    return new Response(md, { headers: { "content-type": "text/markdown; charset=utf-8", "content-disposition": `attachment; filename="${task.id}.md"`, "cache-control": "no-store", "x-task-updated-at": task.updatedAt } }) as never;
   });
 }

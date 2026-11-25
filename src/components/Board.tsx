@@ -1,9 +1,10 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { PriorityPill, ReadinessChip, StatusPill, SystemChips, WaitingChip } from "./bits";
+import { PriorityPill, ReadinessChip, StatusPill, SystemChips, WaitingChip, useNow } from "./bits";
 import { useInboxConfig } from "./config";
 import { STATUS_LABEL, type PublicUser, type Status, type System, type Task } from "@/lib/types";
+import { claudeIsStale } from "@/lib/ready";
 import { isWaitingOn } from "@/lib/waiting";
 import { api, timeAgo } from "@/lib/ui";
 
@@ -25,6 +26,16 @@ export function Board({ initialTasks, user }: { initialTasks: Task[]; user: Publ
   const [system, setSystem] = useState<System | "">("");
   const [q, setQ] = useState("");
   const [waitMe, setWaitMe] = useState(false);
+  const [claude, setClaude] = useState<{ name: string; polledAt?: string } | null>(null);
+  const now = useNow();
+  const stale = claudeIsStale(claude?.polledAt, now);
+
+  useEffect(() => {
+    const load = () => { api<{ claude: { name: string; polledAt?: string } }>("/api/settings").then((r) => setClaude(r.claude)).catch(() => {}); };
+    load();
+    const t = setInterval(load, 60_000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     // The saved choice is applied after hydration on purpose (the server renders "all").
@@ -60,6 +71,11 @@ export function Board({ initialTasks, user }: { initialTasks: Task[]; user: Publ
         <div>
           <h1 className="display text-3xl">งาน</h1>
           <p className="mt-1 text-sm text-mist">{counts.open} งานค้างอยู่ · {counts.new} งานใหม่ · {counts.needs_info} รอข้อมูล</p>
+          {claude?.polledAt && (
+            <p className={`mt-1 text-xs ${stale ? "font-semibold text-amber" : "text-mist"}`} data-testid="claude-poll" suppressHydrationWarning>
+              {stale ? "⚠ " : ""}{claude.name} เช็กงานล่าสุด {timeAgo(claude.polledAt, now)}{stale ? " · ลูปน่าจะหยุดอยู่ งานใหม่จะยังไม่มีใครรับ" : ""}
+            </p>
+          )}
           {myTurn > 0 && !waitMe && <button type="button" onClick={() => pickWaitMe(true)} className="wait-me pill mt-2">ถึงตาคุณ {myTurn} งาน → ดู</button>}
         </div>
         <div className="hidden sm:block"><Link href="/new" className="btn btn-lime">+ สร้างงาน</Link></div>

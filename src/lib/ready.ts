@@ -16,7 +16,13 @@ export const MAX_GRACE_MINUTES = 24 * 60;
 export interface InboxSettings {
   /** Minutes the team's last change must be old before Claude may pull a new task. */
   graceMinutes: number;
+  /** Last time the owner's Claude asked for work (`list --ready`); the board shows it so a stopped loop is noticed. */
+  claudePolledAt?: string;
 }
+
+/** Claude's longest pause between checks is an hour: after this it is probably not running. */
+export const CLAUDE_STALE_MINUTES = 75;
+export const claudeIsStale = (polledAt: string | null | undefined, now: number): boolean => Boolean(polledAt) && now - Date.parse(polledAt!) > CLAUDE_STALE_MINUTES * 60_000;
 
 export function normaliseGrace(raw: unknown): number {
   const n = Math.round(Number(raw));
@@ -38,6 +44,19 @@ export const isHeld = (task: Pick<Task, "hold">): boolean => Boolean(task.hold?.
 
 export function isReady(task: Task, graceMinutes: number, now: number): boolean {
   return task.status === "new" && !isHeld(task) && Date.parse(readyAt(task, graceMinutes)) <= now;
+}
+
+/**
+ * A task needs Claude's attention when the team (a person, or a teammate's
+ * Claude) has written or changed something Claude has not read yet:
+ *   in progress / needs info / review → anything
+ *   done                              → only a comment (closing a task is not a question)
+ *   new                               → no: the ready list has it
+ */
+export function needsAttention(task: Pick<Task, "status" | "teamActivityAt" | "teamCommentAt" | "claudeSeenAt" | "createdAt">): boolean {
+  if (task.status === "new" || task.status === "cancelled") return false;
+  const last = task.status === "done" ? task.teamCommentAt : task.teamActivityAt;
+  return Boolean(last) && last! > (task.claudeSeenAt ?? task.createdAt);
 }
 
 export type Readiness =

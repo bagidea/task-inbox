@@ -1,4 +1,4 @@
-import { fail, forced, handle, isResponse, json, readJson, requireCaller } from "@/lib/server";
+import { fail, forced, handle, isResponse, json, readJson, requireCaller, seenFrom } from "@/lib/server";
 import { isPriority, isStatus, parseLinks, parseSystems, tasks, waitFromBody } from "@/lib/tasks";
 
 export const dynamic = "force-dynamic";
@@ -33,7 +33,7 @@ export async function PATCH(request: Request, { params }: P) {
       status: isStatus(b.status) ? b.status : undefined,
       links: b.links !== undefined ? parseLinks(b.links) : undefined,
       wait: waitFromBody(b),
-    }, c.actor, { force: forced(request) });
+    }, c.actor, { force: forced(request), seenAt: seenFrom(b) });
     return json({ task });
   });
 }

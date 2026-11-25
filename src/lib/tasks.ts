@@ -4,12 +4,12 @@
  */
 import { newId } from "./auth";
 import { getFiles, objectPath, safeFileName } from "./files";
-import { DEFAULT_GRACE_MINUTES, isHeld, isReady, normaliseGrace, sortReady, withReadiness, type InboxSettings } from "./ready";
+import { DEFAULT_GRACE_MINUTES, isHeld, isReady, needsAttention, normaliseGrace, sortReady, withReadiness, type InboxSettings } from "./ready";
 import { getStore } from "./store";
 import type { Store } from "./store";
 import { systemKeys } from "./systems";
 import { WAIT_ACTION_LABEL, afterComment, doersOf, parseWaitAction, sameTargets, waitingLabel, waitingOf, type WaitAction, type WaitTarget, type Waiting } from "./waiting";
-import { PRIORITIES, STATUSES, type Actor, type Attachment, type Hold, type Priority, type Status, type System, type Task, type TaskEvent, type TaskFilter, type TaskLink } from "./types";
+import { isOwnerClaude, PRIORITIES, STATUSES, type Actor, type Attachment, type Hold, type Priority, type Status, type System, type Task, type TaskEvent, type TaskFilter, type TaskLink } from "./types";
 
 export class TaskError extends Error {
   constructor(public readonly status: number, message: string, public readonly extra: Record<string, unknown> = {}) { super(message); }
@@ -77,30 +77,52 @@ export class TaskService {
     return full;
   }
 
-  /** A person changed the task: the grace period starts over. Claude's own entries leave it alone. */
-  private touch(task: Task, actor: Actor, at = this.now()): void {
+  /**
+   * The team changed the task: the grace period starts over. Our Claude's own entries leave it alone and mark
+   * what it has read: up to `seenAt` (when the CLI last showed it the task) if given, so a comment that arrived
+   * while Claude was writing stays unread.
+   */
+  private async touch(task: Task, actor: Actor, at = this.now(), seenAt?: string): Promise<void> {
     task.updatedAt = at;
-    if (actor.kind === "user") task.teamActivityAt = at;
+    if (!isOwnerClaude(actor, await this.ownerId())) { task.teamActivityAt = at; return; }
+    const seen = seenAt && Number.isFinite(Date.parse(seenAt)) && seenAt < at ? seenAt : at;
+    if (!task.claudeSeenAt || seen > task.claudeSeenAt) task.claudeSeenAt = seen;
   }
 
   /** Claude may not write to a held task unless the caller forces it; people always may. */
-  private guard(task: Task, actor: Actor, force: boolean): void {
-    if (actor.kind === "claude" && !force && task.hold?.active) throw new OnHoldError(task.hold);
+  private async guard(task: Task, actor: Actor, force: boolean): Promise<void> {
+    if (!force && task.hold?.active && isOwnerClaude(actor, await this.ownerId())) throw new OnHoldError(task.hold);
   }
 
   async settings(): Promise<InboxSettings> {
     const s = await this.store.getSettings();
-    return { graceMinutes: s?.graceMinutes === undefined ? DEFAULT_GRACE_MINUTES : normaliseGrace(s.graceMinutes) };
+    return { graceMinutes: s?.graceMinutes === undefined ? DEFAULT_GRACE_MINUTES : normaliseGrace(s.graceMinutes), ...(s?.claudePolledAt ? { claudePolledAt: s.claudePolledAt } : {}) };
   }
 
   async saveSettings(patch: Partial<InboxSettings>): Promise<InboxSettings> {
     const cur = await this.settings();
-    const next: InboxSettings = { graceMinutes: patch.graceMinutes === undefined ? cur.graceMinutes : normaliseGrace(patch.graceMinutes) };
+    const next: InboxSettings = { ...cur, graceMinutes: patch.graceMinutes === undefined ? cur.graceMinutes : normaliseGrace(patch.graceMinutes) };
     await this.store.saveSettings(next);
     return next;
   }
 
-  private async decorate<T extends Task>(task: T): Promise<T> { return label(withReadiness(task, (await this.settings()).graceMinutes), await this.claudeName()); }
+  /** The owner's CLI asked for work: remember when (at most one write every 2 minutes; never fails the request). */
+  async notePoll(userId: string): Promise<void> {
+    try {
+      if ((await this.ownerId()) !== userId) return;
+      const cur = await this.settings();
+      const at = this.now();
+      if (cur.claudePolledAt && Date.parse(at) - Date.parse(cur.claudePolledAt) < 120_000) return;
+      await this.store.saveSettings({ ...cur, claudePolledAt: at });
+    } catch (e) { console.warn("[inbox] poll note failed", (e as Error).message); }
+  }
+
+  /** For the board and the CLI: whose Claude works here, and when it last asked for work. */
+  async claudeInfo(): Promise<{ name: string; ownerId: string | null; polledAt?: string }> {
+    return { name: await this.claudeName(), ownerId: await this.ownerId(), polledAt: (await this.settings()).claudePolledAt };
+  }
+
+  private async decorate<T extends Task>(task: T): Promise<T> { return label(withReadiness(task, (await this.settings()).graceMinutes), await this.owner()); }
 
   /** The first admin: the person whose Claude does the work ("owner" in `--wait owner`). */
   private async owner() {
@@ -112,8 +134,7 @@ export class TaskService {
 
   /** Whose Claude: "Alice (Claude)", or plain "Claude" before anyone signs up. */
   private async claudeName(): Promise<string> {
-    const o = await this.owner();
-    return o ? `${o.name} (Claude)` : "Claude";
+    return claudeNameOf(await this.owner());
   }
 
   /**
@@ -124,7 +145,7 @@ export class TaskService {
     const whoText = (Array.isArray(input.who) ? input.who.map(String).join(",") : filled(input.who) ? String(input.who) : "").trim();
     const action = filled(input.action) ? parseWaitAction(input.action) : null;
     if (filled(input.action) && !action) throw new TaskError(400, `ไม่รู้จักสิ่งที่รอ "${String(input.action)}" (ใช้ ${Object.values(WAIT_ACTION_LABEL).join(" / ")} หรือ answer / test / approve / do)`);
-    const current = waitingOf(task);
+    const current = waitingOf(task, await this.ownerId());
     const at = this.now();
     if (whoText.toLowerCase() === "auto") return null;
     if (/^(none|nobody|-|ไม่มี)$/i.test(whoText)) return { who: [], action: action ?? current?.action ?? "do", status: task.status, manual: true, at };
@@ -158,9 +179,10 @@ export class TaskService {
   private async applyWait(task: Task, input: WaitInput, actor: Actor): Promise<void> {
     const next = await this.resolveWait(task, input);
     const claudeName = await this.claudeName();
-    const before = waitingLabel(waitingOf(task), claudeName);
+    const ownerId = await this.ownerId();
+    const before = waitingLabel(waitingOf(task, ownerId), claudeName);
     if (next) task.waitingOn = next; else delete task.waitingOn;
-    const after = waitingLabel(waitingOf(task), claudeName);
+    const after = waitingLabel(waitingOf(task, ownerId), claudeName);
     if (after !== before) await this.event({ taskId: task.id, type: "waiting", actor, ...(before ? { from: before } : {}), to: after ?? "ไม่มีใคร" });
   }
 
@@ -183,7 +205,7 @@ export class TaskService {
       createdBy: actor,
       createdAt: at,
       updatedAt: at,
-      ...(actor.kind === "user" ? { teamActivityAt: at } : {}),
+      ...(isOwnerClaude(actor, await this.ownerId()) ? { claudeSeenAt: at } : { teamActivityAt: at }),
       links: [],
     };
     await this.store.saveTask(stored(task));
@@ -200,24 +222,32 @@ export class TaskService {
 
   async list(filter: TaskFilter): Promise<Task[]> {
     const grace = (await this.settings()).graceMinutes;
-    const cn = await this.claudeName();
-    return (await this.store.listTasks(filter)).map((t) => label(withReadiness(t, grace), cn));
+    const owner = await this.owner();
+    return (await this.store.listTasks(filter)).map((t) => label(withReadiness(t, grace), owner));
   }
 
   /** New tasks Claude may take right now, most urgent first (`GET /api/tasks?ready=1`, `task-inbox list --ready`). */
   async listReady(now = Date.parse(this.now())): Promise<Task[]> {
     const grace = (await this.settings()).graceMinutes;
-    const cn = await this.claudeName();
+    const owner = await this.owner();
     const fresh = await this.store.listTasks({ status: ["new"] });
-    return sortReady(fresh.filter((t) => isReady(t, grace, now)), grace).map((t) => label(withReadiness(t, grace), cn));
+    return sortReady(fresh.filter((t) => isReady(t, grace, now)), grace).map((t) => label(withReadiness(t, grace), owner));
+  }
+
+  /** Tasks where the team wrote something Claude has not read (`GET /api/tasks?attention=1`, `task-inbox list --attention`). */
+  async listAttention(): Promise<Task[]> {
+    const grace = (await this.settings()).graceMinutes;
+    const owner = await this.owner();
+    const open = await this.store.listTasks({ status: ["in_progress", "needs_info", "review", "done"] });
+    return open.filter(needsAttention).sort((a, b) => (a.teamActivityAt ?? "").localeCompare(b.teamActivityAt ?? "")).map((t) => label(withReadiness(t, grace), owner));
   }
 
   events(taskId: string) { return this.store.listEvents(taskId); }
 
   /** Title / body / systems / priority / status; each change that matters gets its own line in the timeline. */
-  async update(id: string, patch: Partial<NewTask> & { links?: TaskLink[]; wait?: WaitInput }, actor: Actor, opts: { force?: boolean } = {}): Promise<Task> {
+  async update(id: string, patch: Partial<NewTask> & { links?: TaskLink[]; wait?: WaitInput }, actor: Actor, opts: { force?: boolean; seenAt?: string } = {}): Promise<Task> {
     const task = await this.get(id);
-    if (patch.status !== undefined && patch.status !== task.status) this.guard(task, actor, Boolean(opts.force));
+    if (patch.status !== undefined && patch.status !== task.status) await this.guard(task, actor, Boolean(opts.force));
     const changed: string[] = [];
     if (patch.title !== undefined && patch.title.trim() !== task.title) {
       if (!patch.title.trim()) throw new TaskError(400, "ต้องมีชื่องาน");
@@ -241,7 +271,7 @@ export class TaskService {
     }
     if (hasWaitInput(patch.wait)) await this.applyWait(task, patch.wait, actor);
     if (changed.length) await this.event({ taskId: task.id, type: "edit", actor, text: `แก้ไข ${changed.join(", ")}` });
-    this.touch(task, actor);
+    await this.touch(task, actor, undefined, opts.seenAt);
     await this.store.saveTask(stored(task));
     return this.decorate(task);
   }
@@ -251,9 +281,9 @@ export class TaskService {
     if (actor.kind === "user" && task.hold?.active) task.hold = { ...task.hold, active: false };
   }
 
-  async comment(id: string, text: string, actor: Actor, status?: Status, opts: { force?: boolean; wait?: WaitInput } = {}): Promise<TaskEvent> {
+  async comment(id: string, text: string, actor: Actor, status?: Status, opts: { force?: boolean; wait?: WaitInput; seenAt?: string } = {}): Promise<TaskEvent> {
     const task = await this.get(id);
-    this.guard(task, actor, Boolean(opts.force));
+    await this.guard(task, actor, Boolean(opts.force));
     if (!text.trim()) throw new TaskError(400, "ข้อความว่าง");
     if (text.length > 100_000) throw new TaskError(400, "ข้อความยาวเกินไป");
     const ev = await this.event({ taskId: task.id, type: "comment", actor, text: text.trim() });
@@ -268,7 +298,8 @@ export class TaskService {
       if (flipped) task.waitingOn = flipped;
     }
     if (hasWaitInput(opts.wait)) await this.applyWait(task, opts.wait, actor);
-    this.touch(task, actor);
+    await this.touch(task, actor, undefined, opts.seenAt);
+    if (!isOwnerClaude(actor, await this.ownerId())) task.teamCommentAt = task.updatedAt;
     await this.store.saveTask(stored(task));
     return ev;
   }
@@ -284,7 +315,7 @@ export class TaskService {
     }
     task.pulledAt = this.now();
     task.pulledBy = actor.name;
-    this.touch(task, actor, task.pulledAt);
+    await this.touch(task, actor, task.pulledAt);
     await this.store.saveTask(stored(task));
     return this.decorate(task);
   }
@@ -314,15 +345,15 @@ export class TaskService {
       task.hold = { ...task.hold!, active: false };
       await this.event({ taskId: task.id, type: "resume", actor, text: clean || undefined });
     }
-    this.touch(task, actor, at);
+    await this.touch(task, actor, at);
     await this.store.saveTask(stored(task));
     return this.decorate(task);
   }
 
   /** The summary from the work session, with its links; the status usually moves to review (or needs_info for questions). */
-  async report(id: string, text: string, actor: Actor, opts: { status?: Status; links?: TaskLink[]; force?: boolean; wait?: WaitInput } = {}): Promise<TaskEvent> {
+  async report(id: string, text: string, actor: Actor, opts: { status?: Status; links?: TaskLink[]; force?: boolean; wait?: WaitInput; seenAt?: string } = {}): Promise<TaskEvent> {
     const task = await this.get(id);
-    this.guard(task, actor, Boolean(opts.force));
+    await this.guard(task, actor, Boolean(opts.force));
     if (!text.trim()) throw new TaskError(400, "สรุปว่าง");
     if (text.length > 200_000) throw new TaskError(400, "สรุปยาวเกินไป");
     const links = opts.links ?? [];
@@ -339,7 +370,7 @@ export class TaskService {
     }
     if (hasWaitInput(opts.wait)) await this.applyWait(task, opts.wait, actor);
     task.reportedAt = this.now();
-    this.touch(task, actor, task.reportedAt);
+    await this.touch(task, actor, task.reportedAt, opts.seenAt);
     await this.store.saveTask(stored(task));
     return ev;
   }
@@ -359,7 +390,7 @@ export class TaskService {
     att.path = objectPath(task.id, att.id, att.name);
     await getFiles().put(att.path, file.bytes, att.type);
     task.attachments = [...task.attachments, att];
-    this.touch(task, actor, att.uploadedAt);
+    await this.touch(task, actor, att.uploadedAt);
     await this.store.saveTask(stored(task));
     await this.event({ taskId: task.id, type: "file_added", actor, files: [att.name] });
     return att;
@@ -371,7 +402,7 @@ export class TaskService {
     if (!att) throw new TaskError(404, "ไม่พบไฟล์");
     await getFiles().remove(att.path);
     task.attachments = task.attachments.filter((a) => a.id !== attachmentId);
-    this.touch(task, actor);
+    await this.touch(task, actor);
     await this.store.saveTask(stored(task));
     await this.event({ taskId: task.id, type: "file_removed", actor, files: [att.name] });
   }
@@ -389,8 +420,10 @@ export class TaskService {
 let service: TaskService | null = null;
 export const tasks = () => (service ??= new TaskService());
 
+const claudeNameOf = (owner: { name: string } | null): string => (owner ? `${owner.name} (Claude)` : "Claude");
+
 /** Adds who acts next ("ถึงตาใคร") to a task for pages and the CLI. */
-function label<T extends Task>(task: T, claudeName: string): T {
-  const waiting = waitingOf(task);
-  return { ...task, waiting, waitingLabel: waitingLabel(waiting, claudeName) };
+function label<T extends Task>(task: T, owner: { id: string; name: string } | null): T {
+  const waiting = waitingOf(task, owner?.id);
+  return { ...task, waiting, waitingLabel: waitingLabel(waiting, claudeNameOf(owner)) };
 }

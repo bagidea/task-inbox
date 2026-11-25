@@ -76,6 +76,13 @@ export interface Actor {
   kind: "user" | "claude";
 }
 
+/**
+ * Whose Claude is it? Teammates use the CLI with their own Claude too ("Bob (Claude)"): for every rule that asks
+ * "did the team write, or did we?", their Claude speaks for them. Only the owner's Claude is "Claude". Without a
+ * known owner every Claude counts as ours. The timeline keeps the real actor.
+ */
+export const isOwnerClaude = (a: Pick<Actor, "id" | "kind">, ownerId?: string | null): boolean => a.kind === "claude" && (!ownerId || a.id === ownerId);
+
 export interface Task {
   id: string; // T-12
   number: number;
@@ -96,6 +103,10 @@ export interface Task {
   reportedAt?: string;
   /** Links the work left behind (test URL, PR, revision). */
   links: TaskLink[];
+  /** Up to when the owner's Claude has read the task (its last entry, or the last `show` before it). */
+  claudeSeenAt?: string;
+  /** Last time the team COMMENTED (a person or a teammate's Claude). */
+  teamCommentAt?: string;
   /** Last change by a PERSON (brief, files, comment, status); Claude's own entries do not move it. Missing on old tasks → `updatedAt`. */
   teamActivityAt?: string;
   /** "ส่งให้ Claude เลย": skip the grace period (only counts when newer than `teamActivityAt`). */

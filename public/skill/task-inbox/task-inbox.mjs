@@ -4,8 +4,10 @@
  * Zero dependencies, Node 18+. Config in ~/.task-inbox.json.
  *
  *   task-inbox config --url https://… --token tin_… [--jobs DIR]
- *   task-inbox list [--status open|new,needs_info|all] [--system web] [--ready] [--json]
- *   task-inbox show T-12 [--json]
+ *   task-inbox list [--status open|new,needs_info|all] [--system web] [--ready | --attention] [--json]
+ *                      --ready: new tasks Claude may take now · --attention: tasks where the team wrote something Claude has not read
+ *   task-inbox show T-12 [--json] [--new]         (--new: only what the team wrote since Claude last read it)
+ *   task-inbox seen T-12 --as-claude              → read it, nothing to answer (drops it from --attention)
  *   task-inbox pull T-12|next [--ready] [--out DIR]   → job folder with task.md + files/ (next --ready: most urgent task Claude may take now; exit 2 when none)
  *   task-inbox hold T-12                          → {active,by,at,note} — did the team press "หยุดก่อน"?
  *   task-inbox create --title "…" (--body-file brief.md | --body "…") [--systems web,backend] [--priority urgent|high|normal|low] [--files a.png b.zip]
@@ -64,7 +66,7 @@ export function parseArgs(argv) {
     if (a.startsWith("--")) {
       const key = a.slice(2);
       const next = argv[i + 1];
-      if (key === "json" || key === "as-claude" || key === "open" || key === "quiet" || key === "ready" || key === "force") { opt[key] = true; continue; }
+      if (key === "json" || key === "as-claude" || key === "open" || key === "quiet" || key === "ready" || key === "attention" || key === "force" || key === "new") { opt[key] = true; continue; }
       if (next === undefined || next.startsWith("--")) { opt[key] = true; continue; }
       if (key === "link" || key === "files") { (opt[key] ??= []).push(next); } else { opt[key] = next; }
       i++;
@@ -110,6 +112,18 @@ const turnLine = (task) => (task.waitingLabel ? ` · ${task.waitingLabel}` : "")
 const holdLine = (task) => (task.hold?.active ? `hold: ${JSON.stringify(task.hold)}` : "hold: none");
 
 const readText = (file) => readFileSync(resolve(file), "utf8");
+/** Up to when this machine has shown each task: sent with Claude's entries, so a comment that arrives meanwhile stays unread. */
+const SEEN = CONFIG.replace(/\.json$/, "") + "-seen.json";
+const seenAll = () => { try { return JSON.parse(readFileSync(SEEN, "utf8")); } catch { return {}; } };
+const markShown = (id, at) => { if (!at) return; try { writeFileSync(SEEN, JSON.stringify({ ...seenAll(), [String(id).toUpperCase()]: at }, null, 1), { mode: 0o600 }); } catch { /* best effort */ } };
+const seenBody = (id, opt) => { const at = isClaude(opt) ? seenAll()[String(id).toUpperCase()] : undefined; return at ? { seenAt: at } : {}; };
+/** What the team wrote that our Claude has not read (`ownerId`: whose Claude is ours). */
+export function unread(task, events, ownerId) {
+  const since = task.claudeSeenAt || task.createdAt;
+  return events.filter((e) => e.at > since && !(e.actor?.kind === "claude" && (!ownerId || e.actor.id === ownerId)));
+}
+/** `at`: when our entry was written; newer activity is the entry itself (a teammate's own CLI), not something unread. */
+const warnUnread = (task, opt, at) => { if (isClaude(opt) && task.teamActivityAt && task.claudeSeenAt && task.teamActivityAt > task.claudeSeenAt && (!at || task.teamActivityAt < at)) console.log(`⚠ ทีมเขียนเพิ่มระหว่างนี้ ยังไม่ได้อ่าน: show ${task.id} --new`); };
 const isClaude = (opt) => Boolean(opt["as-claude"]) || (process.env.TASK_INBOX_ACTOR || "").toLowerCase() === "claude";
 
 function statusList(s) {
@@ -190,6 +204,12 @@ const commands = {
       if (opt.json) console.log(JSON.stringify(tasks, null, 2)); else if (!tasks.length) console.log("ไม่มีงานพร้อมทำ"); else printTasks(tasks);
       return;
     }
+    if (opt.attention) {
+      // Any task where the team wrote something Claude has not read: show <id> --new, then answer with comment (or seen <id>).
+      const { tasks } = await call(cfg, "/api/tasks?attention=1");
+      if (opt.json) console.log(JSON.stringify(tasks, null, 2)); else if (!tasks.length) console.log("ไม่มีข้อความใหม่จากทีม"); else printTasks(tasks);
+      return;
+    }
     const st = statusList(opt.status);
     if (st.length) q.set("status", st.join(","));
     if (opt.system) q.set("system", String(opt.system));
@@ -201,10 +221,29 @@ const commands = {
   async show({ pos, opt }) {
     const id = pos[0] || die("ต้องระบุรหัสงาน เช่น T-12");
     const cfg = need(loadConfig());
-    if (opt.json) { console.log(JSON.stringify(await call(cfg, `/api/tasks/${id}`), null, 2)); return; }
+    if (opt.new) {
+      const [{ task, events }, { claude }] = await Promise.all([call(cfg, `/api/tasks/${id}`), call(cfg, "/api/settings")]);
+      const list = unread(task, events, claude?.ownerId);
+      console.log(`${task.id} · ${task.title} · ${STATUS_TH[task.status]}${turnLine(task)} · ใหม่ ${list.length} รายการ`);
+      for (const e of list) console.log(`\n### ${fmt(e.at)} · ${e.actor?.name} · ${e.type}${e.from || e.to ? ` ${e.from || ""} → ${e.to || ""}` : ""}${e.files?.length ? ` ${e.files.join(", ")}` : ""}${e.text ? `\n${e.text}` : ""}`);
+      markShown(task.id, task.updatedAt);
+      return;
+    }
+    if (opt.json) { const d = await call(cfg, `/api/tasks/${id}`); markShown(d.task.id, d.task.updatedAt); console.log(JSON.stringify(d, null, 2)); return; }
     const res = await fetch(`${cfg.url}/api/tasks/${id}/export`, { headers: { authorization: `Bearer ${cfg.token}` } });
     if (!res.ok) die(`ไม่พบงาน ${id} (${res.status})`);
     console.log(await res.text());
+    markShown(id, res.headers.get("x-task-updated-at"));
+  },
+
+  async seen({ pos, opt }) {
+    const id = pos[0] || die("ต้องระบุรหัสงาน เช่น T-12");
+    const cfg = need(loadConfig());
+    const at = seenAll()[String(id).toUpperCase()];
+    if (!at) die(`ยังไม่ได้เปิดอ่าน ${id} บนเครื่องนี้ (show ${id} --new ก่อน)`);
+    const { task } = await call(cfg, `/api/tasks/${id}`, { method: "PATCH", body: { seenAt: at }, asClaude: isClaude(opt) });
+    console.log(`${task.id} อ่านถึง ${fmt(at)} แล้ว${turnLine(task)}`);
+    warnUnread(task, opt);
   },
 
   async pull({ pos, opt }) {
@@ -224,9 +263,10 @@ const commands = {
       id = pick.id;
     }
     const data = await call(cfg, `/api/tasks/${id}/pull`, { method: "POST", asClaude: isClaude(opt) });
+    markShown(data.task.id, data.task.updatedAt);
     // Tell the team the work has started and how to stop it; skipped while a hold is on (the hold is the message then).
     if (isClaude(opt) && !data.task.hold?.active) {
-      await call(cfg, `/api/tasks/${id}/comments`, { method: "POST", asClaude: true, body: { text: "Claude รับงานแล้ว กำลังทำอยู่ — ถ้าจะแก้โจทย์หรือเพิ่มข้อมูล กด 'หยุดก่อน' ที่หน้างานนี้ก่อนครับ" } }).catch(() => {});
+      await call(cfg, `/api/tasks/${id}/comments`, { method: "POST", asClaude: true, body: { text: "Claude รับงานแล้ว กำลังทำอยู่ — ถ้าจะแก้โจทย์หรือเพิ่มข้อมูล กด 'หยุดก่อน' ที่หน้างานนี้ก่อนครับ", seenAt: data.task.updatedAt } }).catch(() => {});
     }
     const root = opt.out ? resolve(String(opt.out)) : join(cfgFile.jobsDir || resolve("NewJob"), data.folder);
     mkdirSync(join(root, "files"), { recursive: true });
@@ -266,8 +306,9 @@ const commands = {
     if (!text.trim()) die("ต้องมี --text หรือ --file");
     if (opt.status && !STATUSES.includes(opt.status)) die(`สถานะไม่ถูกต้อง: ${opt.status}`);
     const wait = tryWait(opt);
-    const { task } = await call(cfg, `/api/tasks/${id}/comments`, { method: "POST", body: { text, status: opt.status, ...wait }, asClaude: isClaude(opt), force: Boolean(opt.force) });
+    const { task, event } = await call(cfg, `/api/tasks/${id}/comments`, { method: "POST", body: { text, status: opt.status, ...seenBody(id, opt), ...wait }, asClaude: isClaude(opt), force: Boolean(opt.force) });
     console.log(`ส่งความเห็นใน ${task.id} แล้ว · สถานะ ${STATUS_TH[task.status]}${turnLine(task)}`);
+    warnUnread(task, opt, event?.at);
   },
 
   async report({ pos, opt }) {
@@ -278,8 +319,9 @@ const commands = {
     const status = opt.status || "review";
     if (!STATUSES.includes(status)) die(`สถานะไม่ถูกต้อง: ${status}`);
     const wait = tryWait(opt);
-    const { task } = await call(cfg, `/api/tasks/${id}/report`, { method: "POST", body: { text, status, links: parseLinks(opt.link), ...wait }, asClaude: isClaude(opt), force: Boolean(opt.force) });
+    const { task, event } = await call(cfg, `/api/tasks/${id}/report`, { method: "POST", body: { text, status, links: parseLinks(opt.link), ...seenBody(id, opt), ...wait }, asClaude: isClaude(opt), force: Boolean(opt.force) });
     console.log(`ส่งสรุปงาน ${task.id} แล้ว · สถานะ ${STATUS_TH[task.status]}${turnLine(task)}`);
+    warnUnread(task, opt, event?.at);
     console.log(`${cfg.url}/t/${task.id}`);
   },
 
@@ -288,7 +330,7 @@ const commands = {
     if (!id || !STATUSES.includes(status)) die(`ใช้: task-inbox status T-12 <${STATUSES.join("|")}>`);
     const cfg = need(loadConfig());
     const wait = tryWait(opt);
-    const { task } = await call(cfg, `/api/tasks/${id}`, { method: "PATCH", body: { status, ...wait }, asClaude: isClaude(opt), force: Boolean(opt.force) });
+    const { task } = await call(cfg, `/api/tasks/${id}`, { method: "PATCH", body: { status, ...seenBody(id, opt), ...wait }, asClaude: isClaude(opt), force: Boolean(opt.force) });
     console.log(`${task.id} → ${STATUS_TH[task.status]}${turnLine(task)}`);
   },
 
@@ -298,16 +340,16 @@ const commands = {
     if (!id || (!who && !opt.action)) die("ใช้: task-inbox wait T-12 <ชื่อ>[,<ชื่อ>…]|auto|none [--action ตอบ|ทดสอบ|อนุมัติ|ทำ]");
     const cfg = need(loadConfig());
     const wait = tryWait(opt, who, opt.action);
-    const { task } = await call(cfg, `/api/tasks/${id}`, { method: "PATCH", body: wait, asClaude: isClaude(opt) });
+    const { task } = await call(cfg, `/api/tasks/${id}`, { method: "PATCH", body: { ...wait, ...seenBody(id, opt) }, asClaude: isClaude(opt) });
     console.log(`${task.id} · ${task.waitingLabel || "ไม่มีใครต้องทำอะไรต่อ"}`);
   },
 
-  async upload({ pos }) {
+  async upload({ pos, opt }) {
     const [id, ...files] = pos;
     if (!id || !files.length) die("ใช้: task-inbox upload T-12 file1 file2 …");
     const cfg = need(loadConfig());
     const form = await fileForm(files);
-    const { attachments } = await call(cfg, `/api/tasks/${id}/files`, { method: "POST", form });
+    const { attachments } = await call(cfg, `/api/tasks/${id}/files`, { method: "POST", form, asClaude: isClaude(opt) });
     for (const a of attachments) console.log(`แนบ ${a.name} (${a.id})`);
   },
 

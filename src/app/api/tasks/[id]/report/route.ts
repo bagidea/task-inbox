@@ -1,4 +1,4 @@
-import { fail, forced, handle, isResponse, json, readJson, requireCaller } from "@/lib/server";
+import { fail, forced, handle, isResponse, json, readJson, requireCaller, seenFrom } from "@/lib/server";
 import { isStatus, parseLinks, tasks, waitFromBody } from "@/lib/tasks";
 
 export const dynamic = "force-dynamic";
@@ -11,7 +11,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const { id } = await params;
     const b = await readJson(request);
     if (b.status !== undefined && !isStatus(b.status)) return fail(400, "สถานะไม่ถูกต้อง");
-    const event = await tasks().report(id, String(b.text ?? ""), c.actor, { status: isStatus(b.status) ? b.status : undefined, links: parseLinks(b.links), force: forced(request), wait: waitFromBody(b) });
+    const event = await tasks().report(id, String(b.text ?? ""), c.actor, { status: isStatus(b.status) ? b.status : undefined, links: parseLinks(b.links), force: forced(request), wait: waitFromBody(b), seenAt: seenFrom(b) });
     return json({ event, task: await tasks().get(id) }, 201);
   });
 }
